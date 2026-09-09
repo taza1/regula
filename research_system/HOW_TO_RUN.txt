@@ -1,0 +1,59 @@
+================================================================================
+                     HOW TO RUN THE RESEARCH SYSTEM
+================================================================================
+
+QUICKEST WAY (3 commands):
+┌────────────────────────────────────────────────────────────────────────────┐
+│                                                                            │
+│  $ cd research_system                                                      │
+│  $ pip install -r requirements.txt                                         │
+│  $ python run.py                                                           │
+│                                                                            │
+│  Then open: http://localhost:8000/docs                                    │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+WHAT YOU'LL SEE:
+- API running on http://localhost:8000
+- Interactive documentation at http://localhost:8000/docs
+- All endpoints ready to test
+
+WHAT TO DO NEXT:
+1. Open http://localhost:8000/docs in your browser
+2. Try creating a project:
+   - Click "POST /api/v1/projects"
+   - Click "Try it out"
+   - Fill in required fields
+   - Click "Execute"
+
+3. Read GETTING_STARTED.md for full details
+4. Read ARCHITECTURE.md to understand the design
+5. Read IMPLEMENTATION_GUIDE.md for Phase 1-6 development
+
+TROUBLESHOOTING:
+- If "pip install" fails: Make sure Python 3.9+ is installed
+- If port 8000 is busy: Use "python -m uvicorn src.main:app --port 8001"
+- If imports fail: Make sure you're in the research_system directory
+- For Docker: "docker build -t research-system:latest . && docker run -p 8000:8000 research-system:latest"
+
+FILES INCLUDED:
+- GETTING_STARTED.md: Complete setup guide (START HERE!)
+- QUICK_START.md: All environment options
+- ARCHITECTURE.md: Design and patterns
+- IMPLEMENTATION_GUIDE.md: Development roadmap
+- README.md: Feature overview
+- requirements.txt: All dependencies
+- run.py: Development server starter
+- setup.py: Automated setup script
+
+AFTER SETUP:
+- Read the documentation files above
+- Explore the code in src/
+- Run tests: pytest tests/ -v
+- Create a test project via the API
+- Follow the implementation guide for Phase 1
+
+That's it! You're ready to go. Start with:
+$ cd research_system && pip install -r requirements.txt && python run.py
+
+Then visit: http://localhost:8000/docs
