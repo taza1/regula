@@ -2,16 +2,21 @@
 
 from typing import Optional, List
 from functools import lru_cache
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 
 class AzureConfig(BaseSettings):
     """Azure service configuration."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
     
     # Authentication
     tenant_id: str = Field(default="", description="Azure AD tenant ID")
     subscription_id: str = Field(default="", description="Azure subscription ID")
+    azure_region: str = Field(default="westeurope", description="Azure deployment region")
     
     # Cosmos DB
     cosmos_endpoint: str = Field(default="https://research-cosmos.documents.azure.com:443/", 
@@ -40,18 +45,36 @@ class AzureConfig(BaseSettings):
     key_vault_url: str = Field(default="https://research-vault.vault.azure.net/", 
                                description="Key Vault URL")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-
-
 class ModelConfig(BaseSettings):
     """LLM and model configuration."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # Provider selection. "mock" is safe and deterministic for local startup.
+    model_provider: str = Field(default="mock", description="mock, local_proxy, or azure")
+    model_base_url: str = Field(
+        default="http://127.0.0.1:8765/v1",
+        description="OpenAI-compatible base URL for the local Azure bridge",
+    )
+    model_api_key: str = Field(
+        default="",
+        description="Loopback bridge key supplied only through local environment",
+    )
+    model_timeout_seconds: float = Field(default=120.0, gt=0)
     
     # OpenAI configuration
-    openai_api_version: str = Field(default="2023-12-01-preview", description="OpenAI API version")
-    openai_deployment_id: str = Field(default="research-gpt4", description="OpenAI deployment ID")
-    openai_model: str = Field(default="gpt-4-turbo", description="OpenAI model name")
+    openai_api_version: str = Field(default="v1", description="OpenAI API version")
+    openai_deployment_id: str = Field(default="gpt-5.6-sol", description="Azure deployment ID")
+    openai_model: str = Field(default="gpt-5.6-sol", description="OpenAI-compatible model name")
+    azure_openai_endpoint: str = Field(
+        default="", description="Azure resource endpoint, excluding /openai/v1"
+    )
+    azure_openai_token_scope: str = Field(
+        default="https://cognitiveservices.azure.com/.default",
+        description="Microsoft Entra token scope for the Azure model endpoint",
+    )
     openai_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     openai_max_tokens: int = Field(default=4096, ge=1, le=8192)
     
@@ -66,13 +89,12 @@ class ModelConfig(BaseSettings):
     hybrid_search_weight_keyword: float = Field(default=0.6, description="Keyword search weight")
     hybrid_search_weight_semantic: float = Field(default=0.4, description="Semantic search weight")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-
-
 class ResearchConfig(BaseSettings):
     """Research system configuration."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
     
     # Project settings
     max_concurrent_runs: int = Field(default=5, description="Max concurrent research runs")
@@ -98,28 +120,26 @@ class ResearchConfig(BaseSettings):
     require_human_approval: bool = Field(default=True, description="Require human approval before release")
     require_separate_publisher: bool = Field(default=True, description="Require different user as publisher")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-
-
 class APIConfig(BaseSettings):
     """API server configuration."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
     
     host: str = Field(default="0.0.0.0", description="API server host")
     port: int = Field(default=8000, description="API server port")
     api_version: str = Field(default="1.0", description="API version")
     enable_docs: bool = Field(default=True, description="Enable OpenAPI docs")
+    local_db_path: str = Field(
+        default="data/research_system.db",
+        description="SQLite state path used by the local development adapter",
+    )
     
     # CORS
     cors_origins: List[str] = Field(default=["http://localhost:3000"], description="CORS allowed origins")
     cors_credentials: bool = Field(default=True, description="Allow credentials in CORS")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-
-
 @lru_cache()
 def get_azure_config() -> AzureConfig:
     """Get cached Azure configuration."""

@@ -1,0 +1,10 @@
+{
+  "name": "research-system-e2e",
+  "private": true,
+  "scripts": {
+    "test:e2e": "playwright test tests/e2e --reporter=line --workers=1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

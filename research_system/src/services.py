@@ -7,13 +7,24 @@ from abc import ABC, abstractmethod
 
 from src.models import (
     RunState, ResearchRequest, RunRecord, ProjectModel, 
-    ApprovalRecord, ReleaseRecord, TenantModel, EvidenceRecord, ClaimRecord
+    ApprovalRecord, ReleaseRecord, TenantModel, EvidenceRecord, ClaimRecord,
+    ProjectMembership,
 )
 from src.config import get_research_config, get_azure_config
+from src.local_store import LocalStateStore
+
+
+def _default_store() -> LocalStateStore:
+    from src.config import get_api_config
+
+    return LocalStateStore(get_api_config().local_db_path)
 
 
 class TenantService:
     """Service for tenant management."""
+
+    def __init__(self, store: Optional[LocalStateStore] = None):
+        self.store = store or _default_store()
     
     async def create_tenant(self, name: str) -> TenantModel:
         """Create a new tenant."""
@@ -23,17 +34,20 @@ class TenantService:
             name=name,
             created_at=datetime.utcnow()
         )
-        # TODO: Persist to Cosmos DB
+        self.store.put("tenant", tenant_id, "", tenant_id, tenant.model_dump(mode="json"))
         return tenant
     
     async def get_tenant(self, tenant_id: str) -> Optional[TenantModel]:
         """Retrieve tenant by ID."""
-        # TODO: Query from Cosmos DB
-        return None
+        payload = self.store.get("tenant", tenant_id, "", tenant_id)
+        return TenantModel.model_validate(payload) if payload else None
 
 
 class ProjectService:
     """Service for project management and authorization."""
+
+    def __init__(self, store: Optional[LocalStateStore] = None):
+        self.store = store or _default_store()
     
     async def create_project(
         self,
@@ -55,13 +69,15 @@ class ProjectService:
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )
-        # TODO: Persist to Cosmos DB
+        self.store.put(
+            "project", tenant_id, project_id, project_id, project.model_dump(mode="json")
+        )
         return project
     
     async def get_project(self, tenant_id: str, project_id: str) -> Optional[ProjectModel]:
         """Get project with authorization check."""
-        # TODO: Query from Cosmos DB with tenant validation
-        return None
+        payload = self.store.get("project", tenant_id, project_id, project_id)
+        return ProjectModel.model_validate(payload) if payload else None
     
     async def add_member(
         self,
@@ -71,7 +87,14 @@ class ProjectService:
         roles: List[str]
     ) -> bool:
         """Add member to project with roles."""
-        # TODO: Update project membership in Cosmos DB
+        project = await self.get_project(tenant_id, project_id)
+        if not project:
+            return False
+        project.members[user_id] = [ProjectMembership(role) for role in roles]
+        project.updated_at = datetime.utcnow()
+        self.store.put(
+            "project", tenant_id, project_id, project_id, project.model_dump(mode="json")
+        )
         return True
     
     async def verify_user_role(
@@ -82,15 +105,21 @@ class ProjectService:
         required_role: str
     ) -> bool:
         """Verify user has required role in project."""
-        # TODO: Check membership in Cosmos DB
-        return False
+        project = await self.get_project(tenant_id, project_id)
+        if not project:
+            return False
+        return required_role in [
+            role.value if hasattr(role, "value") else role
+            for role in project.members.get(user_id, [])
+        ]
 
 
 class ResearchRunService:
     """Service for managing research runs."""
     
-    def __init__(self):
+    def __init__(self, store: Optional[LocalStateStore] = None):
         self.research_config = get_research_config()
+        self.store = store or _default_store()
     
     async def create_run(
         self,
@@ -114,9 +143,7 @@ class ResearchRunService:
             updated_time=datetime.utcnow()
         )
         
-        # TODO: Persist to Cosmos DB
-        # TODO: Record audit event
-        
+        self.store.put("run", tenant_id, project_id, run_id, run.model_dump(mode="json"))
         return run
     
     async def get_run(
@@ -126,8 +153,8 @@ class ResearchRunService:
         run_id: str
     ) -> Optional[RunRecord]:
         """Get run record with authorization check."""
-        # TODO: Query from Cosmos DB with tenant/project validation
-        return None
+        payload = self.store.get("run", tenant_id, project_id, run_id)
+        return RunRecord.model_validate(payload) if payload else None
     
     async def update_run_state(
         self,
@@ -138,8 +165,28 @@ class ResearchRunService:
         revision: int = 1
     ) -> bool:
         """Update run state with optimistic concurrency."""
-        # TODO: Conditional update in Cosmos DB using ETag
-        # Must check tenant/project scope before update
+        run = await self.get_run(tenant_id, project_id, run_id)
+        if not run or run.report_revision != revision:
+            return False
+        run.state = new_state
+        run.updated_time = datetime.utcnow()
+        self.store.put("run", tenant_id, project_id, run_id, run.model_dump(mode="json"))
+        return True
+
+    async def save_research_plan(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        plan: Dict[str, Any],
+    ) -> bool:
+        """Attach a validated planner result to a local run."""
+        run = await self.get_run(tenant_id, project_id, run_id)
+        if not run:
+            return False
+        run.research_plan = plan
+        run.updated_time = datetime.utcnow()
+        self.store.put("run", tenant_id, project_id, run_id, run.model_dump(mode="json"))
         return True
     
     async def record_claim(
@@ -175,14 +222,16 @@ class ResearchRunService:
         reason: str
     ) -> bool:
         """Cancel a research run."""
-        # TODO: Transition to cancelling state
-        # TODO: Increment work epoch to reject in-flight results
-        # TODO: Record cancellation in audit trail
-        return True
+        return await self.update_run_state(
+            tenant_id, project_id, run_id, RunState.CANCELLED
+        )
 
 
 class ApprovalService:
     """Service for managing approvals and releases."""
+
+    def __init__(self, store: Optional[LocalStateStore] = None):
+        self.store = store or _default_store()
     
     async def request_approval(
         self,
@@ -208,9 +257,13 @@ class ApprovalService:
             approved_at=datetime.utcnow()
         )
         
-        # TODO: Persist to Cosmos DB
-        # TODO: Record audit event
-        
+        self.store.put(
+            "approval",
+            tenant_id,
+            project_id,
+            approval.approval_id,
+            approval.model_dump(mode="json"),
+        )
         return approval
     
     async def get_approval(
@@ -220,8 +273,8 @@ class ApprovalService:
         approval_id: str
     ) -> Optional[ApprovalRecord]:
         """Get approval record."""
-        # TODO: Query from Cosmos DB
-        return None
+        payload = self.store.get("approval", tenant_id, project_id, approval_id)
+        return ApprovalRecord.model_validate(payload) if payload else None
     
     async def revoke_approval(
         self,
@@ -231,13 +284,25 @@ class ApprovalService:
         reason: str
     ) -> bool:
         """Revoke an approval."""
-        # TODO: Mark approval as invalid
-        # TODO: Record audit event with reason
+        approval = await self.get_approval(tenant_id, project_id, approval_id)
+        if not approval:
+            return False
+        approval.validity = False
+        self.store.put(
+            "approval",
+            tenant_id,
+            project_id,
+            approval_id,
+            approval.model_dump(mode="json"),
+        )
         return True
 
 
 class ReleaseService:
     """Service for managing internal report releases."""
+
+    def __init__(self, store: Optional[LocalStateStore] = None):
+        self.store = store or _default_store()
     
     async def prepare_release(
         self,
@@ -248,6 +313,15 @@ class ReleaseService:
         approval_record: ApprovalRecord
     ) -> Optional[str]:
         """Prepare artifacts for release."""
+        if (
+            approval_record is None
+            or not approval_record.validity
+            or approval_record.tenant_id != tenant_id
+            or approval_record.project_id != project_id
+            or approval_record.run_id != run_id
+            or approval_record.report_revision != report_revision
+        ):
+            return None
         # TODO: Freeze report, evidence manifest, evaluation results
         # TODO: Verify manifest signatures
         # TODO: Upload to private Blob Storage
@@ -265,7 +339,14 @@ class ReleaseService:
         approval_record: ApprovalRecord
     ) -> Optional[ReleaseRecord]:
         """Commit release with ADR-015 invariants."""
-        # TODO: Perform conditional Cosmos DB transaction:
+        if not approval_record.validity:
+            return None
+        run_service = ResearchRunService(self.store)
+        run = await run_service.get_run(tenant_id, project_id, run_id)
+        if not run or run.state != RunState.APPROVED:
+            return None
+
+        # TODO: Replace this local sequence with the conditional Cosmos transaction:
         #   1. Check authorization and project guard version
         #   2. Check approval still valid
         #   3. Verify run state is approved
@@ -279,7 +360,7 @@ class ReleaseService:
             tenant_id=tenant_id,
             project_id=project_id,
             run_id=run_id,
-            report_revision=report_revision,
+            report_revision=approval_record.report_revision,
             release_id=release_id,
             released_at=datetime.utcnow(),
             released_by=approval_record.approver_id,
@@ -288,7 +369,16 @@ class ReleaseService:
             manifest_blob_url="https://storage.blob.core.windows.net/..."
         )
         
-        # TODO: Persist to Cosmos DB
+        self.store.put(
+            "release", tenant_id, project_id, release_id, release.model_dump(mode="json")
+        )
+        await run_service.update_run_state(
+            tenant_id,
+            project_id,
+            run_id,
+            RunState.RELEASED,
+            revision=approval_record.report_revision,
+        )
         return release
     
     async def get_release(
@@ -298,9 +388,8 @@ class ReleaseService:
         release_id: str
     ) -> Optional[ReleaseRecord]:
         """Get release record."""
-        # TODO: Query from Cosmos DB
-        # TODO: Verify authorization for audience
-        return None
+        payload = self.store.get("release", tenant_id, project_id, release_id)
+        return ReleaseRecord.model_validate(payload) if payload else None
     
     async def list_releases(
         self,
@@ -310,10 +399,12 @@ class ReleaseService:
         offset: int = 0
     ) -> List[ReleaseRecord]:
         """List releases in project."""
-        # TODO: Query from Cosmos DB
-        # TODO: Filter by project and tenant
-        # TODO: Verify user can access each release
-        return []
+        return [
+            ReleaseRecord.model_validate(payload)
+            for payload in self.store.list(
+                "release", tenant_id, project_id, limit=limit, offset=offset
+            )
+        ]
     
     async def withdraw_release(
         self,
@@ -324,10 +415,16 @@ class ReleaseService:
         withdrawn_by: str
     ) -> bool:
         """Withdraw a published release."""
-        # TODO: Update release marker
-        # TODO: Invalidate cached content
-        # TODO: Dispatch withdrawal event
-        # TODO: Record audit trail
+        release = await self.get_release(tenant_id, project_id, release_id)
+        if not release or release.is_withdrawn:
+            return False
+        release.is_withdrawn = True
+        release.withdrawal_reason = reason
+        release.withdrawn_at = datetime.utcnow()
+        release.withdrawn_by = withdrawn_by
+        self.store.put(
+            "release", tenant_id, project_id, release_id, release.model_dump(mode="json")
+        )
         return True
 
 

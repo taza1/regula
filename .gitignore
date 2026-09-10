@@ -1,2 +1,11 @@
 .terraform/
 .DS_Store
+__pycache__/
+*.py[cod]
+research_system/data/*.db
+research_system/node_modules/
+research_system/test-results/
+research_system/playwright-report/
+research_system/.env
+research_system/.env.*
+!research_system/.env.example

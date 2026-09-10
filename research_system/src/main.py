@@ -1,12 +1,13 @@
 """FastAPI application for the research system."""
 
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from src.config import get_api_config, get_azure_config
+from src.config import get_api_config, get_azure_config, get_model_config
 from src.models import (
     RunState, ResearchRequest, RunRecord, ProjectModel,
     EvidenceRecord, ClaimRecord, ReviewFinding
@@ -15,7 +16,9 @@ from src.services import (
     TenantService, ProjectService, ResearchRunService,
     ApprovalService, ReleaseService, EvidenceService
 )
-from src.agents import AgentOrchestrator
+from src.agents import AgentMessage, AgentOrchestrator, AgentRole
+from src.local_store import LocalStateStore
+from src.model_client import ModelConnectionError, ResearchModelClient, create_model_client
 
 
 # ============================================================================
@@ -30,6 +33,7 @@ approval_service: Optional[ApprovalService] = None
 release_service: Optional[ReleaseService] = None
 evidence_service: Optional[EvidenceService] = None
 orchestrator: Optional[AgentOrchestrator] = None
+model_client: Optional[ResearchModelClient] = None
 
 
 @asynccontextmanager
@@ -37,22 +41,25 @@ async def lifespan(app: FastAPI):
     """Application lifecycle management."""
     global tenant_service, project_service, run_service
     global approval_service, release_service, evidence_service, orchestrator
+    global model_client
     
     # Startup
-    tenant_service = TenantService()
-    project_service = ProjectService()
-    run_service = ResearchRunService()
-    approval_service = ApprovalService()
-    release_service = ReleaseService()
+    store = LocalStateStore(api_config.local_db_path)
+    tenant_service = TenantService(store)
+    project_service = ProjectService(store)
+    run_service = ResearchRunService(store)
+    approval_service = ApprovalService(store)
+    release_service = ReleaseService(store)
     evidence_service = EvidenceService()
-    orchestrator = AgentOrchestrator()
+    model_client = create_model_client(get_model_config())
+    orchestrator = AgentOrchestrator(model_client)
     
-    print("✓ Research system services initialized")
+    print("Research system services initialized")
     
     yield
     
     # Shutdown
-    print("✓ Research system shutdown")
+    print("Research system shutdown")
 
 
 # ============================================================================
@@ -97,8 +104,8 @@ class CreateRunRequest(BaseModel):
     scope_description: str
     date_range_start: Optional[str] = None
     date_range_end: Optional[str] = None
-    languages: List[str] = ["en"]
-    approved_source_domains: List[str] = []
+    languages: List[str] = Field(default_factory=lambda: ["en"])
+    approved_source_domains: List[str] = Field(default_factory=list)
     max_sources: int = 100
     max_cost_usd: float = 50.0
 
@@ -140,7 +147,9 @@ async def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "version": api_config.api_version
+        "version": api_config.api_version,
+        "storage": "sqlite-local",
+        "model_provider": get_model_config().model_provider,
     }
 
 
@@ -150,12 +159,21 @@ async def system_info():
     return {
         "system": "Multi-Agent Research System",
         "version": api_config.api_version,
-        "azure_region": azure_config.blob_storage_account,
+        "azure_region": azure_config.azure_region,
         "models": {
-            "llm": "gpt-4-turbo",
-            "embedding": "text-embedding-3-small"
-        }
+            "llm": get_model_config().openai_model,
+            "embedding": get_model_config().embedding_model,
+        },
+        "model_provider": model_client.status() if model_client else None,
     }
+
+
+@app.get("/api/v1/ai/status")
+async def model_status():
+    """Show the selected provider without sending a model request."""
+    if not model_client:
+        raise HTTPException(status_code=503, detail="Model client is not initialized")
+    return model_client.status()
 
 
 # ============================================================================
@@ -218,7 +236,9 @@ async def create_research_run(
 ):
     """Create a new research run."""
     try:
-        # TODO: Verify user is researcher in project
+        project = await project_service.get_project(tenant_id, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
         
         research_request = ResearchRequest(
             title=request.title,
@@ -238,6 +258,8 @@ async def create_research_run(
             "run": run.model_dump(mode='json'),
             "message": "Research run created. Awaiting scope confirmation."
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -260,6 +282,48 @@ async def get_research_run(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/plan")
+async def plan_research_run(tenant_id: str, project_id: str, run_id: str):
+    """Run the planner agent and persist its bounded plan before confirmation."""
+    run = await run_service.get_run(tenant_id, project_id, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.state != RunState.AWAITING_SCOPE_CONFIRMATION:
+        raise HTTPException(
+            status_code=409,
+            detail="Planning is only allowed while scope confirmation is pending",
+        )
+    message = AgentMessage(
+        agent_role=AgentRole.PLANNER,
+        run_id=run_id,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        input_payload={
+            "research_request": run.research_request.model_dump(mode="json")
+        },
+    )
+    try:
+        result = await orchestrator.execute_phase(
+            RunState.AWAITING_SCOPE_CONFIRMATION.value, message
+        )
+    except ModelConnectionError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    if result.status != "completed":
+        raise HTTPException(
+            status_code=422,
+            detail=result.error_message or "Planner returned an invalid result",
+        )
+    await run_service.save_research_plan(
+        tenant_id, project_id, run_id, result.output_payload
+    )
+    return {
+        "run_id": run_id,
+        "provider": model_client.status(),
+        "plan": result.output_payload,
+        "message": "Plan created. Review it before confirming scope.",
+    }
+
+
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/confirm-scope")
 async def confirm_research_scope(
     tenant_id: str,
@@ -278,6 +342,15 @@ async def confirm_research_scope(
                 "message": "Research run cancelled",
                 "run_id": run_id
             }
+
+        run = await run_service.get_run(tenant_id, project_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if not run.research_plan:
+            raise HTTPException(
+                status_code=409,
+                detail="Create and review a research plan before confirming scope",
+            )
         
         # Transition to queued state
         success = await run_service.update_run_state(
@@ -337,7 +410,16 @@ async def request_approval(
 ):
     """Request approval for a report."""
     try:
-        # TODO: Get authenticated user (approver_id)
+        run = await run_service.get_run(tenant_id, project_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if run.state != RunState.AWAITING_APPROVAL:
+            raise HTTPException(
+                status_code=409,
+                detail="Run is not awaiting approval; release remains blocked",
+            )
+
+        # TODO: Replace with authenticated Publisher identity.
         approver_id = "publisher-123"  # Placeholder
         
         approval = await approval_service.request_approval(
@@ -367,28 +449,13 @@ async def release_report(
     request: ReleaseReportRequest
 ):
     """Release an approved report for internal publication."""
-    try:
-        # TODO: Verify approval and run state
-        # TODO: Freeze artifacts and compute digest
-        # TODO: Execute ADR-015 release protocol
-        
-        release_id = await release_service.prepare_release(
-            tenant_id, project_id, run_id,
-            report_revision=1,
-            approval_record=None  # TODO: Fetch approval
-        )
-        
-        if not release_id:
-            raise HTTPException(status_code=409, detail="Failed to prepare release")
-        
-        return {
-            "release_id": release_id,
-            "message": "Report released for internal publication"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Internal release is not implemented. Artifact verification, "
+            "authenticated approval, and conditional commit are required."
+        ),
+    )
 
 
 @app.post("/api/v1/releases/{release_id}/withdraw")
@@ -478,10 +545,10 @@ async def get_evidence(
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     """Handle HTTP exceptions."""
-    return {
-        "error": exc.detail,
-        "status_code": exc.status_code
-    }
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.detail, "status_code": exc.status_code},
+    )
 
 
 # ============================================================================

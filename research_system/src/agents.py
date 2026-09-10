@@ -5,7 +5,10 @@ from enum import Enum
 from abc import ABC, abstractmethod
 from datetime import datetime
 import json
+import uuid
 from pydantic import BaseModel, Field
+
+from src.model_client import MockResearchModelClient, ResearchModelClient
 
 
 class AgentRole(str, Enum):
@@ -31,7 +34,7 @@ class AgentMessage(BaseModel):
     tenant_id: str
     project_id: str
     report_revision: int = 1
-    message_id: str
+    message_id: str = Field(default_factory=lambda: f"MSG-{uuid.uuid4().hex[:12].upper()}")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     input_payload: Dict[str, Any] = Field(default_factory=dict)
     output_payload: Dict[str, Any] = Field(default_factory=dict)
@@ -77,17 +80,15 @@ class Agent(ABC):
 class PlannerAgent(Agent):
     """Decomposes research questions into subquestions and queries."""
     
-    def __init__(self):
+    def __init__(self, model_client: Optional[ResearchModelClient] = None):
         super().__init__(AgentRole.PLANNER, "Planner Agent")
+        self.model_client = model_client or MockResearchModelClient()
     
     async def execute(self, message: AgentMessage) -> AgentMessage:
         """Decompose research request into subquestions."""
-        # TODO: Call LLM to decompose question
-        message.output_payload = {
-            "subquestions": [],
-            "search_queries": [],
-            "evidence_criteria": {}
-        }
+        message.output_payload = await self.model_client.create_research_plan(
+            message.input_payload["research_request"]
+        )
         message.status = "completed"
         return message
     
@@ -255,10 +256,11 @@ class CriticalReviewerAgent(Agent):
 class AgentOrchestrator:
     """Orchestrates multi-agent execution flow."""
     
-    def __init__(self):
+    def __init__(self, model_client: Optional[ResearchModelClient] = None):
         self.agents: Dict[AgentRole, Agent] = {}
         self.execution_history: List[AgentMessage] = []
         self.state_machine = self._build_state_machine()
+        self.register_agent(PlannerAgent(model_client))
     
     def register_agent(self, agent: Agent) -> None:
         """Register an agent."""

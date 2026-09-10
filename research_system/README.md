@@ -2,7 +2,14 @@
 
 ## Overview
 
-This is the foundational implementation of a comprehensive multi-agent research platform following the specification in `SPECIFICATION.md`. The system orchestrates multiple AI agents to conduct research, fact-check findings, and publish vetted reports with full audit trails.
+This is an early implementation of the multi-agent research plan. The local vertical slice persists projects and runs in SQLite, generates and stores a bounded research plan, and requires scope confirmation before queueing. The planner can run deterministically offline or call an Azure model with Microsoft Entra authentication.
+
+### Current implementation status
+
+- Working: health/OpenAPI, local project and run persistence, planner agent, scope confirmation, provider status, and guarded 404/409/502 errors.
+- Azure-verified: direct `gpt-5.6-sol` planner inference through `DefaultAzureCredential`; no Azure API key is stored.
+- Still scaffolded: source connectors, crawling, Blob Storage, AI Search, Cosmos DB, Service Bus, retrieval/synthesis/review agents, authenticated authorization, and the production release protocol.
+- The release endpoint returns `501 Not Implemented` until verified artifacts, authenticated approval, and conditional commit exist; this prototype never claims a report was published.
 
 ## Architecture
 
@@ -128,6 +135,7 @@ This is the foundational implementation of a comprehensive multi-agent research 
 ### Health & System
 - `GET /health` - Health check
 - `GET /api/v1/system/info` - System information
+- `GET /api/v1/ai/status` - Selected model provider (does not call the model)
 
 ### Projects
 - `POST /api/v1/projects` - Create project
@@ -136,6 +144,7 @@ This is the foundational implementation of a comprehensive multi-agent research 
 ### Research Runs
 - `POST /api/v1/projects/{project_id}/runs` - Create research run
 - `GET /api/v1/projects/{project_id}/runs/{run_id}` - Get run status
+- `POST /api/v1/projects/{project_id}/runs/{run_id}/plan` - Generate and persist a research plan
 - `POST /api/v1/projects/{project_id}/runs/{run_id}/confirm-scope` - Confirm research scope
 - `POST /api/v1/projects/{project_id}/runs/{run_id}/cancel` - Cancel run
 
@@ -157,18 +166,28 @@ This is the foundational implementation of a comprehensive multi-agent research 
 pip install -r requirements.txt
 ```
 
-2. **Configure environment:**
-```bash
-cp .env.example .env
-# Edit .env with your Azure credentials and settings
+2. **Run the offline local mode:**
+```powershell
+.\run_local.ps1
 ```
 
-3. **Run development server:**
-```bash
-python run.py
+The API is available at `http://127.0.0.1:8000`; Swagger is at `/docs`. This mode uses SQLite and a deterministic planner, so it does not send data or incur model usage.
+
+### Azure model inference from the local API
+
+Sign in with `az login`, then run:
+
+```powershell
+.\run_azure.ps1
 ```
 
-The API will be available at `http://localhost:8000` with docs at `/docs`.
+The launcher uses the existing `gpt-5.6-sol` default for this checkout. Override it when needed:
+
+```powershell
+.\run_azure.ps1 -Endpoint 'https://your-resource.openai.azure.com' -Deployment 'your-deployment' -Port 8010
+```
+
+Locally, `DefaultAzureCredential` uses the Azure CLI session. In Azure hosting it can use managed identity. The model-backed operation is `POST /api/v1/projects/{project_id}/runs/{run_id}/plan`.
 
 ### Docker Deployment
 
@@ -184,25 +203,9 @@ docker run -p 8000:8000 \
   research-system:latest
 ```
 
-### Azure Deployment
+### Azure hosting
 
-1. **Create Azure resources using Bicep:**
-```bash
-az deployment group create \
-  --resource-group my-rg \
-  --template-file infra/main.bicep \
-  --parameters parameters.json
-```
-
-2. **Deploy to Container Instances or App Service:**
-```bash
-az container create \
-  --resource-group my-rg \
-  --name research-system \
-  --image research-system:latest \
-  --ports 8000 \
-  --environment-variables-from-file env.list
-```
+Azure infrastructure and application hosting are not implemented in this checkout yet. The direct model connection above is a local development path, not a deployed production service.
 
 ## Key Design Decisions
 
@@ -244,14 +247,19 @@ Run with coverage:
 pytest --cov=src tests/
 ```
 
+Install Chromium once and run the browser/API journey:
+
+```powershell
+npm install
+npx playwright install chromium
+npm run test:e2e
+```
+
 ## Security Considerations
 
-1. **Authentication**: Uses Azure AD and managed identities
-2. **Authorization**: Project-scoped role-based access control
-3. **Data Isolation**: Tenant and project boundaries enforced
-4. **Source Handling**: Retrieved documents treated as untrusted
-5. **Secrets Management**: Azure Key Vault for external API credentials
-6. **Audit Trail**: Complete operation history with actor information
+1. **Implemented for model access**: Microsoft Entra tokens via `DefaultAzureCredential`; no Azure API key is stored.
+2. **Local-only boundary**: SQLite lookups include tenant and project identifiers, but API authentication and production authorization are not implemented.
+3. **Planned controls**: managed identity, Cosmos isolation, Key Vault, private networking, source-policy enforcement, and complete audit records remain future work.
 
 ## Next Steps for Implementation
 

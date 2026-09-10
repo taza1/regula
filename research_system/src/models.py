@@ -246,6 +246,7 @@ class RunRecord(BaseModel):
     policy_epoch: int
     claims: List[str] = Field(default_factory=list)
     findings: List[str] = Field(default_factory=list)
+    research_plan: Optional[Dict[str, Any]] = None
     spent_budget_usd: float = 0.0
     start_time: datetime
     updated_time: datetime

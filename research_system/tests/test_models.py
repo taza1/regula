@@ -88,6 +88,7 @@ class TestModels:
             claim_id="CLM-001",
             text="Global temperatures have increased by 1.1°C since pre-industrial times.",
             material=True,
+            assertion_scope="single-origin",
             confidence=0.92
         )
         
@@ -152,11 +153,12 @@ class TestServices:
     """Test service layer."""
     
     @pytest.mark.asyncio
-    async def test_project_service_create(self):
+    async def test_project_service_create(self, tmp_path):
         """Test project creation."""
+        from src.local_store import LocalStateStore
         from src.services import ProjectService
         
-        service = ProjectService()
+        service = ProjectService(LocalStateStore(str(tmp_path / "projects.db")))
         project = await service.create_project(
             tenant_id="TEN-001",
             name="Test Project",
@@ -167,11 +169,12 @@ class TestServices:
         assert project.name == "Test Project"
     
     @pytest.mark.asyncio
-    async def test_run_service_create(self):
+    async def test_run_service_create(self, tmp_path):
         """Test research run creation."""
+        from src.local_store import LocalStateStore
         from src.services import ResearchRunService
         
-        service = ResearchRunService()
+        service = ResearchRunService(LocalStateStore(str(tmp_path / "runs.db")))
         request = ResearchRequest(
             title="Test",
             primary_question="Question?",
