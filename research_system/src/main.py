@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
     run_service = ResearchRunService(store)
     approval_service = ApprovalService(store)
     release_service = ReleaseService(store)
-    evidence_service = EvidenceService()
+    evidence_service = EvidenceService(store)
     model_client = create_model_client(get_model_config())
     orchestrator = AgentOrchestrator(model_client)
     
@@ -136,6 +136,11 @@ class SearchEvidenceRequest(BaseModel):
     query: str
     search_type: str = "hybrid"
     limit: int = 20
+
+
+class IndexEvidenceRequest(BaseModel):
+    """Locally index one evidence passage for a research run."""
+    evidence: EvidenceRecord
 
 
 # ============================================================================
@@ -505,7 +510,8 @@ async def search_evidence(
         results = await evidence_service.search_evidence(
             tenant_id, project_id, run_id,
             query=request.query,
-            search_type=request.search_type
+            search_type=request.search_type,
+            limit=request.limit,
         )
         
         return {
@@ -514,6 +520,30 @@ async def search_evidence(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/evidence")
+async def index_evidence(
+    tenant_id: str,
+    project_id: str,
+    run_id: str,
+    request: IndexEvidenceRequest,
+):
+    """Store one evidence passage in the local searchable evidence index."""
+    evidence = request.evidence
+    if (
+        evidence.tenant_id != tenant_id
+        or evidence.project_id != project_id
+        or evidence.run_id != run_id
+    ):
+        raise HTTPException(status_code=400, detail="Evidence scope does not match request path")
+    if not await run_service.get_run(tenant_id, project_id, run_id):
+        raise HTTPException(status_code=404, detail="Research run not found")
+    if not await evidence_service.index_evidence(
+        tenant_id, project_id, run_id, [evidence]
+    ):
+        raise HTTPException(status_code=409, detail="Evidence could not be indexed")
+    return {"evidence": evidence.model_dump(mode="json"), "message": "Evidence indexed"}
 
 
 @app.get("/api/v1/projects/{project_id}/evidence/{evidence_id}")

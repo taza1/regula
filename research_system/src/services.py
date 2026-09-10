@@ -209,9 +209,16 @@ class ResearchRunService:
         evidence: EvidenceRecord
     ) -> bool:
         """Record evidence in the run."""
-        # TODO: Persist evidence to Cosmos DB
-        # TODO: Store original content in Blob Storage
-        # TODO: Add to Azure AI Search index
+        run = await self.get_run(tenant_id, project_id, run_id)
+        if not run or evidence.tenant_id != tenant_id or evidence.project_id != project_id:
+            return False
+        self.store.put(
+            "evidence",
+            tenant_id,
+            project_id,
+            evidence.evidence_id,
+            evidence.model_dump(mode="json"),
+        )
         return True
     
     async def cancel_run(
@@ -430,6 +437,9 @@ class ReleaseService:
 
 class EvidenceService:
     """Service for managing evidence and search index."""
+
+    def __init__(self, store: Optional[LocalStateStore] = None):
+        self.store = store or _default_store()
     
     async def search_evidence(
         self,
@@ -437,14 +447,28 @@ class EvidenceService:
         project_id: str,
         run_id: str,
         query: str,
-        search_type: str = "hybrid"  # hybrid, keyword, semantic
+        search_type: str = "hybrid",  # hybrid, keyword, semantic
+        limit: int = 20,
     ) -> List[EvidenceRecord]:
         """Search evidence with hybrid retrieval."""
-        # TODO: Query Azure AI Search
-        # TODO: Apply tenant/project/source-use filters
-        # TODO: Filter by policy and access permissions
-        # TODO: Rank by relevance
-        return []
+        if not query.strip():
+            return []
+        terms = [term.lower() for term in query.split() if term.strip()]
+        candidates = self.store.list("evidence", tenant_id, project_id, limit=1000)
+        ranked: list[tuple[int, EvidenceRecord]] = []
+        for payload in candidates:
+            evidence = EvidenceRecord.model_validate(payload)
+            if evidence.run_id != run_id or evidence.source_use_decision.value != "allowed":
+                continue
+            haystack = " ".join(
+                [evidence.title, evidence.passage, evidence.url, evidence.doi or ""]
+                + evidence.authors
+            ).lower()
+            score = sum(haystack.count(term) for term in terms)
+            if score:
+                ranked.append((score, evidence))
+        ranked.sort(key=lambda item: (-item[0], item[1].created_at))
+        return [evidence for _, evidence in ranked[: max(1, min(limit, 100))]]
     
     async def get_evidence(
         self,
@@ -453,9 +477,8 @@ class EvidenceService:
         evidence_id: str
     ) -> Optional[EvidenceRecord]:
         """Get evidence record."""
-        # TODO: Query from Cosmos DB or Azure AI Search
-        # TODO: Verify authorization
-        return None
+        payload = self.store.get("evidence", tenant_id, project_id, evidence_id)
+        return EvidenceRecord.model_validate(payload) if payload else None
     
     async def index_evidence(
         self,
@@ -465,7 +488,18 @@ class EvidenceService:
         evidence_list: List[EvidenceRecord]
     ) -> bool:
         """Index evidence for retrieval."""
-        # TODO: Generate embeddings
-        # TODO: Store in Azure AI Search
-        # TODO: Update index metadata
+        for evidence in evidence_list:
+            if (
+                evidence.tenant_id != tenant_id
+                or evidence.project_id != project_id
+                or evidence.run_id != run_id
+            ):
+                return False
+            self.store.put(
+                "evidence",
+                tenant_id,
+                project_id,
+                evidence.evidence_id,
+                evidence.model_dump(mode="json"),
+            )
         return True
