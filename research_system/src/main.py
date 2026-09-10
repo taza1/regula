@@ -376,6 +376,51 @@ async def confirm_research_scope(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/execute-local")
+async def execute_local_research(
+    tenant_id: str,
+    project_id: str,
+    run_id: str,
+):
+    """Run the deterministic offline discovery and ingestion pipeline."""
+    try:
+        run = await run_service.get_run(tenant_id, project_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if run.state != RunState.QUEUED:
+            raise HTTPException(
+                status_code=409,
+                detail="Local execution requires a scope-confirmed queued run",
+            )
+        if not run.research_plan:
+            raise HTTPException(
+                status_code=409,
+                detail="Create and confirm a research plan before local execution",
+            )
+
+        if not await run_service.update_run_state(
+            tenant_id, project_id, run_id, RunState.COLLECTING
+        ):
+            raise HTTPException(status_code=409, detail="Failed to start local execution")
+
+        result = await evidence_service.discover_and_ingest_plan(
+            tenant_id, project_id, run_id, run.research_plan
+        )
+        return {
+            "run_id": run_id,
+            "state": RunState.COLLECTING.value,
+            "source_count": len(result["sources"]),
+            "evidence_count": len(result["evidence"]),
+            "sources": [source.model_dump(mode="json") for source in result["sources"]],
+            "evidence": [item.model_dump(mode="json") for item in result["evidence"]],
+            "message": "Local discovery and evidence ingestion completed.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/cancel")
 async def cancel_research_run(
     tenant_id: str,

@@ -1,7 +1,8 @@
 """API service implementations for research system."""
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, TypedDict
 from datetime import datetime
+import hashlib
 import uuid
 from abc import ABC, abstractmethod
 
@@ -12,6 +13,14 @@ from src.models import (
 )
 from src.config import get_research_config, get_azure_config
 from src.local_store import LocalStateStore
+from src.source_connectors import LocalSourceConnector, SourceConnector, SourceRecord
+
+
+class DiscoveryIngestionResult(TypedDict):
+    """Typed result of the local planner-query pipeline."""
+
+    sources: List[SourceRecord]
+    evidence: List[EvidenceRecord]
 
 
 def _default_store() -> LocalStateStore:
@@ -438,8 +447,198 @@ class ReleaseService:
 class EvidenceService:
     """Service for managing evidence and search index."""
 
-    def __init__(self, store: Optional[LocalStateStore] = None):
+    def __init__(
+        self,
+        store: Optional[LocalStateStore] = None,
+        connector: Optional[SourceConnector] = None,
+    ):
         self.store = store or _default_store()
+        # Local is the only default.  A remote connector must be explicitly
+        # injected by a future deployment after its policy is configured.
+        self.connector = connector or LocalSourceConnector()
+
+    async def discover_sources(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        search_queries: List[str],
+        max_sources: Optional[int] = None,
+    ) -> List[SourceRecord]:
+        """Discover and persist sources for planner-generated search queries.
+
+        The run lookup is intentionally performed before any connector call so
+        a caller cannot create source records outside an existing scoped run.
+        """
+
+        run = await ResearchRunService(self.store).get_run(
+            tenant_id, project_id, run_id
+        )
+        if not run:
+            return []
+        configured_limit = run.research_request.max_sources
+        requested_limit = configured_limit if max_sources is None else max_sources
+        if int(requested_limit) <= 0:
+            return []
+        total_limit = max(
+            1, min(int(requested_limit), configured_limit, 1000)
+        )
+        sources: List[SourceRecord] = []
+        seen_ids: set[str] = set()
+        for query in search_queries:
+            if not isinstance(query, str) or not query.strip():
+                continue
+            remaining = total_limit - len(sources)
+            if remaining <= 0:
+                break
+            discovered = await self.connector.search(query, limit=remaining)
+            for source in discovered:
+                if source.source_id in seen_ids:
+                    continue
+                seen_ids.add(source.source_id)
+                scoped_source = source.model_copy(
+                    update={
+                        "tenant_id": tenant_id,
+                        "project_id": project_id,
+                        "run_id": run_id,
+                    }
+                )
+                sources.append(scoped_source)
+                self.store.put(
+                    "source",
+                    tenant_id,
+                    project_id,
+                    f"{run_id}:{scoped_source.source_id}",
+                    scoped_source.model_dump(mode="json"),
+                )
+                if len(sources) >= total_limit:
+                    break
+        return sources
+
+    async def list_sources(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        limit: int = 100,
+    ) -> List[SourceRecord]:
+        """List only source records belonging to the requested run."""
+
+        payloads = self.store.list(
+            "source", tenant_id, project_id, limit=max(1, min(limit, 1000))
+        )
+        return [
+            source
+            for payload in payloads
+            if (source := SourceRecord.model_validate(payload)).run_id == run_id
+        ]
+
+    async def ingest_sources(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        sources: List[SourceRecord],
+    ) -> List[EvidenceRecord]:
+        """Turn discovered local source passages into scoped evidence records.
+
+        Ingestion is content-addressed: retrying the same source produces the
+        same evidence ID and updates the same local record rather than
+        duplicating evidence.
+        """
+
+        run = await ResearchRunService(self.store).get_run(
+            tenant_id, project_id, run_id
+        )
+        if not run:
+            return []
+        for source in sources:
+            if (
+                (source.tenant_id and source.tenant_id != tenant_id)
+                or (source.project_id and source.project_id != project_id)
+                or (source.run_id and source.run_id != run_id)
+                or not source.source_id
+                or not source.passage.strip()
+            ):
+                return []
+
+        ingested: List[EvidenceRecord] = []
+        for source in sources:
+            passage = source.passage.strip()
+            content_hash = hashlib.sha256(passage.encode("utf-8")).hexdigest()
+            evidence_id = "EVD-" + hashlib.sha256(
+                f"{tenant_id}|{project_id}|{run_id}|{source.source_id}|{content_hash}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()[:16].upper()
+            evidence = EvidenceRecord(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                run_id=run_id,
+                report_revision=run.report_revision,
+                evidence_id=evidence_id,
+                source_id=source.source_id,
+                source_type=source.source_type,
+                title=source.title,
+                url=source.url,
+                doi=source.doi,
+                authors=source.authors,
+                published_at=source.published_at,
+                retrieved_at=datetime.utcnow(),
+                peer_review_status=source.peer_review_status,
+                section="abstract",
+                passage=passage,
+                content_hash=f"sha256:{content_hash}",
+                license=source.license,
+                source_use_decision=source.source_use_decision,
+                independence_group_ids=[source.source_id],
+                eligibility_status=source.eligibility_status,
+                policy_version=source.policy_version,
+            )
+            self.store.put(
+                "evidence",
+                tenant_id,
+                project_id,
+                evidence.evidence_id,
+                evidence.model_dump(mode="json"),
+            )
+            ingested.append(evidence)
+        return ingested
+
+    async def discover_and_ingest(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        search_queries: List[str],
+        max_sources: Optional[int] = None,
+    ) -> DiscoveryIngestionResult:
+        """Execute the deterministic planner-query -> source -> evidence slice."""
+
+        sources = await self.discover_sources(
+            tenant_id, project_id, run_id, search_queries, max_sources=max_sources
+        )
+        evidence = await self.ingest_sources(
+            tenant_id, project_id, run_id, sources
+        )
+        return {"sources": sources, "evidence": evidence}
+
+    async def discover_and_ingest_plan(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        plan: Dict[str, Any],
+        max_sources: Optional[int] = None,
+    ) -> DiscoveryIngestionResult:
+        """Run discovery and ingestion from a persisted planner result."""
+
+        queries = plan.get("search_queries", [])
+        if not isinstance(queries, list):
+            return {"sources": [], "evidence": []}
+        return await self.discover_and_ingest(
+            tenant_id, project_id, run_id, queries, max_sources=max_sources
+        )
     
     async def search_evidence(
         self,

@@ -7,11 +7,12 @@
 - [x] Add mock and Azure AI planning clients
 - [x] Persist local state in SQLite
 - [x] Persist tenant/project/run-scoped evidence
+- [x] Add deterministic offline source discovery and ingestion
 - [x] Add ranked local evidence search
 - [x] Add Python and Playwright test coverage
 - [x] Add local and Azure launcher scripts
 
-## Next milestone: source discovery
+## Next milestone: real source discovery
 
 - [ ] Add OpenAlex connector
 - [ ] Add Crossref connector

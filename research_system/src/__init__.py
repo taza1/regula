@@ -12,6 +12,9 @@ from src.services import (
     TenantService, ProjectService, ResearchRunService,
     ApprovalService, ReleaseService, EvidenceService
 )
+from src.source_connectors import (
+    LocalSourceConnector, SourceConnector, SourceRecord
+)
 
 __all__ = [
     "RunState",
@@ -30,4 +33,7 @@ __all__ = [
     "ApprovalService",
     "ReleaseService",
     "EvidenceService",
+    "SourceRecord",
+    "SourceConnector",
+    "LocalSourceConnector",
 ]

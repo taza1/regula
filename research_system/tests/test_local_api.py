@@ -75,6 +75,22 @@ def test_project_run_and_mock_plan_survive_service_restart(tmp_path, monkeypatch
         )
         assert queued.json()["state"] == "queued"
 
+        executed = client.post(
+            f"/api/v1/projects/{project_id}/runs/{run_id}/execute-local",
+            params={"tenant_id": tenant_id},
+        )
+        assert executed.status_code == 200
+        assert executed.json()["source_count"] >= 1
+        assert executed.json()["evidence_count"] >= 1
+
+        searched = client.post(
+            f"/api/v1/projects/{project_id}/runs/{run_id}/search",
+            params={"tenant_id": tenant_id},
+            json={"query": "evidence", "limit": 10},
+        )
+        assert searched.status_code == 200
+        assert searched.json()["count"] >= 1
+
         release = client.post(
             f"/api/v1/projects/{project_id}/runs/{run_id}/release",
             params={"tenant_id": tenant_id},
