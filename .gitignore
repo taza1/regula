@@ -9,3 +9,7 @@ research_system/playwright-report/
 research_system/.env
 research_system/.env.*
 !research_system/.env.example
+research_system/.venv/
+research_system/.pytest_cache/
+research_system/.coverage
+research_system/htmlcov/
