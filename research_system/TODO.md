@@ -26,11 +26,12 @@
 
 ## Evidence pipeline
 
-- [ ] Download HTML and PDF documents
-- [ ] Extract clean text and passages
+- [x] Download HTML and PDF documents
+- [x] Extract clean text and passages
 - [x] Calculate content hashes and detect local source duplicates
 - [x] Store source metadata and local snapshot artifacts
 - [x] Add abstract-level passage metadata and citation references
+- [x] Archive full-text extraction metadata and content-addressed snapshots
 
 ## Search and research generation
 

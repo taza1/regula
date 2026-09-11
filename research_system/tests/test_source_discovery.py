@@ -5,6 +5,7 @@ import pytest
 from src.local_store import LocalStateStore
 from src.models import PeerReviewStatus, ResearchRequest, SourceType
 from src.services import EvidenceService, ResearchRunService, source_passes_governance
+from src.evidence_extraction import ExtractionError, chunk_text, fetch_document
 from src.source_connectors import (
     ArxivConnector,
     CrossrefConnector,
@@ -308,6 +309,39 @@ def test_source_governance_enforces_domains_and_licenses():
     assert not source_passes_governance(
         source, excluded_domains=["papers.example.org"], allowed_licenses=["cc-by"]
     )
+
+
+def test_html_extraction_and_chunk_deduplication():
+    class Response:
+        content = b"<html><body><h1>Title</h1><p>First paragraph.</p><script>bad()</script><p>Second paragraph.</p></body></html>"
+        headers = {"Content-Type": "text/html"}
+
+        def raise_for_status(self):
+            return None
+
+    source = SourceRecord(
+        source_id="HTML-1",
+        connector="test",
+        title="HTML",
+        url="https://open.example/article",
+        license="cc-by",
+    )
+    document = fetch_document(source, approved_domains=["open.example"], session=type(
+        "Session", (), {"get": staticmethod(lambda *args, **kwargs: Response())}
+    ))
+    assert document.media_type == "text/html"
+    chunks = chunk_text("One paragraph.\n\nOne paragraph.\n\nA longer second paragraph.", max_chars=40, overlap_chars=5)
+    assert len(chunks) == 2
+    assert "bad" not in document.text
+
+
+def test_document_policy_rejects_unapproved_url():
+    source = SourceRecord(
+        source_id="HTML-2", connector="test", title="HTML",
+        url="https://paywalled.example/article", license="cc-by",
+    )
+    with pytest.raises(ExtractionError):
+        fetch_document(source, approved_domains=["open.example"])
     assert not source_passes_governance(
         source, approved_domains=["other.example"], allowed_licenses=["cc-by"]
     )

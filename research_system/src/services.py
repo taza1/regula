@@ -2,6 +2,7 @@
 
 from typing import Optional, List, Dict, Any, TypedDict
 from datetime import datetime
+import asyncio
 import hashlib
 import re
 import uuid
@@ -26,6 +27,7 @@ from src.source_connectors import (
     SourceConnector,
     SourceRecord,
 )
+from src.evidence_extraction import chunk_text, fetch_document
 
 
 class DiscoveryIngestionResult(TypedDict):
@@ -925,6 +927,61 @@ class EvidenceService:
             )
             ingested.append(evidence)
         return ingested
+
+    async def ingest_full_sources(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        sources: List[SourceRecord],
+        *,
+        max_chars: int = 2000,
+        overlap_chars: int = 200,
+        max_bytes: int = 10_000_000,
+    ) -> List[EvidenceRecord]:
+        """Fetch approved full documents, archive snapshots, and ingest chunks.
+
+        This is intentionally explicit; the default local execution path only
+        ingests provider abstracts and performs no document network I/O.
+        """
+
+        run = await ResearchRunService(self.store).get_run(tenant_id, project_id, run_id)
+        if not run:
+            return []
+        config = get_research_config()
+        expanded: List[SourceRecord] = []
+        for source in sources:
+            if not source_passes_governance(
+                source,
+                approved_domains=run.research_request.approved_source_domains,
+                excluded_domains=run.research_request.excluded_domains,
+                allowed_licenses=config.allowed_source_licenses,
+                require_permissive_license=config.require_permissive_license,
+            ):
+                continue
+            document = await asyncio.to_thread(
+                fetch_document,
+                source,
+                approved_domains=run.research_request.approved_source_domains,
+                excluded_domains=run.research_request.excluded_domains,
+                timeout_seconds=config.openalex_timeout_seconds,
+                max_bytes=max_bytes,
+            )
+            for index, passage in enumerate(
+                chunk_text(document.text, max_chars=max_chars, overlap_chars=overlap_chars)
+            ):
+                expanded.append(source.model_copy(update={
+                    "passage": passage,
+                    "abstract": passage,
+                    "metadata": {
+                        **source.metadata,
+                        "extraction_media_type": document.media_type,
+                        "extraction_content_hash": f"sha256:{document.content_hash}",
+                        "extraction_chunk_index": index,
+                        "extraction_url": document.url,
+                    },
+                }))
+        return await self.ingest_sources(tenant_id, project_id, run_id, expanded)
 
     async def discover_and_ingest(
         self,
