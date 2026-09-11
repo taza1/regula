@@ -89,9 +89,10 @@ These are the first implementation tickets I would open:
 | Done | Add legal run transition table and local revision checks. | TASK-002, TASK-017 | Confirming, cancelling, and local execution cannot revive terminal runs. |
 | P0 | Add run epochs/stale worker protection for background execution. | TASK-002, TASK-017 | Retried or late worker results are rejected after cancellation, retry, policy change, or successor run creation. |
 | P0 | Harden OpenAlex connector and add Crossref/arXiv behind the same source interface. | TASK-007 | A local run ingests real normalized scholarly metadata from multiple scholarly providers with retries and attribution. |
-| P0 | Persist immutable source snapshots and passage records. | TASK-010, TASK-011 | Evidence has hash, retrieval timestamp, source ID, passage location, and eligibility. |
+| Done | Persist immutable local source snapshots and passage records. | TASK-010, TASK-011 | Evidence has hash, retrieval timestamp, source ID, passage location, and eligibility. |
 | P1 | Add local FTS retrieval, then Azure AI Search schema. | TASK-012, TASK-013 | Search returns scoped, ranked evidence and fixture precision/recall thresholds pass. |
-| P1 | Implement synthesis plus claim ledger. | TASK-016, TASK-030 | Drafts only cite eligible evidence; unsupported claims are tracked. |
+| Done | Implement deterministic local draft skeleton plus claim ledger. | TASK-016, TASK-030 | Drafts cite eligible evidence and claims remain pending review. |
+| P1 | Implement reviewed LLM synthesis with insufficiency/contradiction handling. | TASK-016, TASK-030 | Unsupported claims are tracked as insufficient evidence and cannot enter a release-ready draft. |
 | P1 | Implement citation validator and fact-checker. | TASK-018, TASK-019 | Bad citation and unsupported-claim fixtures block release readiness. |
 | P1 | Add Bicep/azd foundation for dev. | TASK-004, TASK-005, TASK-006 | Empty resource group deploys all required services with managed identities. |
 | P2 | Implement Service Bus workers and stale-result rejection. | TASK-017, TASK-004 | Duplicate/retried messages are idempotent and cancelled runs reject late output. |

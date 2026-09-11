@@ -15,7 +15,7 @@ from src.models import (
 )
 from src.services import (
     TenantService, ProjectService, ResearchRunService,
-    ApprovalService, ReleaseService, EvidenceService
+    ApprovalService, ReleaseService, EvidenceService, SynthesisService
 )
 from src.agents import AgentMessage, AgentOrchestrator, AgentRole
 from src.local_store import LocalStateStore
@@ -33,6 +33,7 @@ run_service: Optional[ResearchRunService] = None
 approval_service: Optional[ApprovalService] = None
 release_service: Optional[ReleaseService] = None
 evidence_service: Optional[EvidenceService] = None
+synthesis_service: Optional[SynthesisService] = None
 orchestrator: Optional[AgentOrchestrator] = None
 model_client: Optional[ResearchModelClient] = None
 
@@ -41,7 +42,7 @@ model_client: Optional[ResearchModelClient] = None
 async def lifespan(app: FastAPI):
     """Application lifecycle management."""
     global tenant_service, project_service, run_service
-    global approval_service, release_service, evidence_service, orchestrator
+    global approval_service, release_service, evidence_service, synthesis_service, orchestrator
     global model_client
     
     # Startup
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
     approval_service = ApprovalService(store)
     release_service = ReleaseService(store)
     evidence_service = EvidenceService(store)
+    synthesis_service = SynthesisService(store)
     model_client = create_model_client(get_model_config())
     orchestrator = AgentOrchestrator(model_client)
     
@@ -559,6 +561,74 @@ async def execute_local_research(
             "sources": [source.model_dump(mode="json") for source in result["sources"]],
             "evidence": [item.model_dump(mode="json") for item in result["evidence"]],
             "message": "Local discovery and evidence ingestion completed.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/synthesize-local")
+async def synthesize_local_research(
+    project_id: str,
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Create a deterministic cited draft skeleton and claim ledger locally."""
+    try:
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN],
+        )
+        run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if run.state != RunState.COLLECTING:
+            raise HTTPException(
+                status_code=409,
+                detail="Local synthesis requires a completed local evidence collection step",
+            )
+        if not await run_service.update_run_state(
+            scoped_tenant_id,
+            project_id,
+            run_id,
+            RunState.SYNTHESIZING,
+            expected_state=RunState.COLLECTING,
+        ):
+            raise HTTPException(status_code=409, detail="Failed to start synthesis")
+
+        result = await synthesis_service.synthesize_local(
+            scoped_tenant_id, project_id, run_id
+        )
+        if not result:
+            await run_service.update_run_state(
+                scoped_tenant_id,
+                project_id,
+                run_id,
+                RunState.INSUFFICIENT_EVIDENCE,
+                expected_state=RunState.SYNTHESIZING,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="No eligible evidence is available for local synthesis",
+            )
+        await run_service.update_run_state(
+            scoped_tenant_id,
+            project_id,
+            run_id,
+            RunState.REVIEWING,
+            expected_state=RunState.SYNTHESIZING,
+        )
+        return {
+            "run_id": run_id,
+            "state": RunState.REVIEWING.value,
+            "draft": result["draft"].model_dump(mode="json"),
+            "claims": [claim.model_dump(mode="json") for claim in result["claims"]],
+            "message": "Local draft skeleton created. Review gates are still required before approval or release.",
         }
     except HTTPException:
         raise

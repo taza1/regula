@@ -8,9 +8,10 @@ import uuid
 from abc import ABC, abstractmethod
 
 from src.models import (
-    RunState, ResearchRequest, RunRecord, ProjectModel, 
+    RunState, ResearchRequest, RunRecord, ProjectModel,
     ApprovalRecord, ReleaseRecord, TenantModel, EvidenceRecord, ClaimRecord,
-    ProjectMembership,
+    ProjectMembership, SourceSnapshotRecord, PassageRecord, DraftReport,
+    EvidenceLink, EvidenceRelation,
 )
 from src.config import get_research_config, get_azure_config
 from src.local_store import LocalStateStore
@@ -30,10 +31,60 @@ class DiscoveryIngestionResult(TypedDict):
     evidence: List[EvidenceRecord]
 
 
+class SynthesisResult(TypedDict):
+    """Typed result of the local evidence-to-draft skeleton."""
+
+    draft: DraftReport
+    claims: List[ClaimRecord]
+
+
 def _default_store() -> LocalStateStore:
     from src.config import get_api_config
 
     return LocalStateStore(get_api_config().local_db_path)
+
+
+def _sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _normalize_doi(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    doi = value.strip().casefold()
+    doi = doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
+    return doi or None
+
+
+def _title_fingerprint(value: str) -> str:
+    words = re.findall(r"[a-z0-9]{2,}", value.casefold())
+    return "-".join(words[:12])
+
+
+def canonical_source_id(source: SourceRecord) -> str:
+    """Return a provider-independent local canonical ID for deduplication."""
+
+    doi = _normalize_doi(source.doi)
+    if doi:
+        return "CAN-DOI-" + _sha256_hex(doi)[:16].upper()
+    metadata = source.metadata or {}
+    for key in ("openalex_id", "arxiv_id", "crossref_doi"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return f"CAN-{key.upper().replace('_', '-')}-" + _sha256_hex(
+                value.strip().casefold()
+            )[:16].upper()
+    year = str(source.published_at.year) if source.published_at else "unknown"
+    fingerprint = _title_fingerprint(source.title)
+    return "CAN-TITLE-" + _sha256_hex(f"{fingerprint}|{year}")[:16].upper()
+
+
+def _first_sentence(text: str) -> str:
+    compact = " ".join(text.split())
+    if not compact:
+        return ""
+    match = re.search(r"(.{40,240}?[.!?])(?:\s|$)", compact)
+    return match.group(1) if match else compact[:240]
 
 
 class TenantService:
@@ -294,9 +345,40 @@ class ResearchRunService:
         claim: ClaimRecord
     ) -> bool:
         """Record a claim in the run."""
-        # TODO: Persist claim to Cosmos DB
-        # TODO: Update run's claim list
+        run = await self.get_run(tenant_id, project_id, run_id)
+        if not run or claim.tenant_id != tenant_id or claim.project_id != project_id:
+            return False
+        self.store.put(
+            "claim",
+            tenant_id,
+            project_id,
+            claim.claim_id,
+            claim.model_dump(mode="json"),
+        )
+        if claim.claim_id not in run.claims:
+            run.claims.append(claim.claim_id)
+            run.updated_time = datetime.utcnow()
+            self.store.put(
+                "run", tenant_id, project_id, run_id, run.model_dump(mode="json")
+            )
         return True
+
+    async def list_claims(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        limit: int = 100,
+    ) -> List[ClaimRecord]:
+        """List claims belonging to a run."""
+        payloads = self.store.list(
+            "claim", tenant_id, project_id, limit=max(1, min(limit, 1000))
+        )
+        return [
+            claim
+            for payload in payloads
+            if (claim := ClaimRecord.model_validate(payload)).run_id == run_id
+        ]
     
     async def record_evidence(
         self,
@@ -571,6 +653,13 @@ class EvidenceService:
         )
         sources: List[SourceRecord] = []
         seen_ids: set[str] = set()
+        seen_canonical_ids: set[str] = set()
+        for existing in await self.list_sources(tenant_id, project_id, run_id, limit=1000):
+            seen_canonical_ids.add(
+                existing.metadata.get("canonical_source_id")
+                if isinstance(existing.metadata.get("canonical_source_id"), str)
+                else canonical_source_id(existing)
+            )
         for query in search_queries:
             if not isinstance(query, str) or not query.strip():
                 continue
@@ -584,14 +673,19 @@ class EvidenceService:
                 date_range_end=run.research_request.date_range_end,
             )
             for source in discovered:
-                if source.source_id in seen_ids:
+                canonical_id = canonical_source_id(source)
+                if source.source_id in seen_ids or canonical_id in seen_canonical_ids:
                     continue
                 seen_ids.add(source.source_id)
+                seen_canonical_ids.add(canonical_id)
+                metadata = dict(source.metadata)
+                metadata["canonical_source_id"] = canonical_id
                 scoped_source = source.model_copy(
                     update={
                         "tenant_id": tenant_id,
                         "project_id": project_id,
                         "run_id": run_id,
+                        "metadata": metadata,
                     }
                 )
                 sources.append(scoped_source)
@@ -656,12 +750,53 @@ class EvidenceService:
         ingested: List[EvidenceRecord] = []
         for source in sources:
             passage = source.passage.strip()
-            content_hash = hashlib.sha256(passage.encode("utf-8")).hexdigest()
+            content_hash = _sha256_hex(passage)
+            canonical_id = (
+                source.metadata.get("canonical_source_id")
+                if isinstance(source.metadata.get("canonical_source_id"), str)
+                else canonical_source_id(source)
+            )
+            source_identity = f"{tenant_id}|{project_id}|{run_id}|{canonical_id}|{content_hash}"
+            snapshot_id = "SSN-" + _sha256_hex(source_identity)[:16].upper()
+            passage_id = "PAS-" + _sha256_hex(
+                f"{snapshot_id}|abstract|0|{content_hash}"
+            )[:16].upper()
             evidence_id = "EVD-" + hashlib.sha256(
-                f"{tenant_id}|{project_id}|{run_id}|{source.source_id}|{content_hash}".encode(
+                f"{tenant_id}|{project_id}|{run_id}|{canonical_id}|{passage_id}".encode(
                     "utf-8"
                 )
             ).hexdigest()[:16].upper()
+            retrieved_at = datetime.utcnow()
+            snapshot = SourceSnapshotRecord(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                run_id=run_id,
+                snapshot_id=snapshot_id,
+                source_id=source.source_id,
+                canonical_source_id=canonical_id,
+                provider=source.connector,
+                url=source.url,
+                doi=source.doi,
+                retrieved_at=retrieved_at,
+                content_hash=f"sha256:{content_hash}",
+                raw_metadata=source.model_dump(mode="json"),
+                text=passage,
+                storage_uri=f"sqlite://source_snapshot/{snapshot_id}",
+            )
+            passage_record = PassageRecord(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                run_id=run_id,
+                passage_id=passage_id,
+                source_id=source.source_id,
+                source_snapshot_id=snapshot_id,
+                canonical_source_id=canonical_id,
+                section="abstract",
+                offset_start=0,
+                offset_end=len(passage),
+                text=passage,
+                content_hash=f"sha256:{content_hash}",
+            )
             evidence = EvidenceRecord(
                 tenant_id=tenant_id,
                 project_id=project_id,
@@ -669,22 +804,38 @@ class EvidenceService:
                 report_revision=run.report_revision,
                 evidence_id=evidence_id,
                 source_id=source.source_id,
+                source_snapshot_id=snapshot_id,
+                passage_id=passage_id,
                 source_type=source.source_type,
                 title=source.title,
                 url=source.url,
                 doi=source.doi,
                 authors=source.authors,
                 published_at=source.published_at,
-                retrieved_at=datetime.utcnow(),
+                retrieved_at=retrieved_at,
                 peer_review_status=source.peer_review_status,
                 section="abstract",
                 passage=passage,
                 content_hash=f"sha256:{content_hash}",
                 license=source.license,
                 source_use_decision=source.source_use_decision,
-                independence_group_ids=[source.source_id],
+                independence_group_ids=[canonical_id],
                 eligibility_status=source.eligibility_status,
                 policy_version=source.policy_version,
+            )
+            self.store.put(
+                "source_snapshot",
+                tenant_id,
+                project_id,
+                snapshot.snapshot_id,
+                snapshot.model_dump(mode="json"),
+            )
+            self.store.put(
+                "passage",
+                tenant_id,
+                project_id,
+                passage_record.passage_id,
+                passage_record.model_dump(mode="json"),
             )
             self.store.put(
                 "evidence",
@@ -798,6 +949,108 @@ class EvidenceService:
                 evidence.model_dump(mode="json"),
             )
         return True
+
+
+class SynthesisService:
+    """Create a deterministic local draft skeleton from accepted evidence."""
+
+    def __init__(self, store: Optional[LocalStateStore] = None):
+        self.store = store or _default_store()
+
+    async def synthesize_local(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        limit: int = 5,
+    ) -> Optional[SynthesisResult]:
+        """Build a cited draft skeleton and claim ledger without publication."""
+
+        run_service = ResearchRunService(self.store)
+        run = await run_service.get_run(tenant_id, project_id, run_id)
+        if not run:
+            return None
+        payloads = self.store.list(
+            "evidence", tenant_id, project_id, limit=max(1, min(limit, 25))
+        )
+        evidence_records = [
+            evidence
+            for payload in payloads
+            if (evidence := EvidenceRecord.model_validate(payload)).run_id == run_id
+            and evidence.source_use_decision.value == "allowed"
+        ][: max(1, min(limit, 25))]
+        if not evidence_records:
+            return None
+
+        claims: List[ClaimRecord] = []
+        for index, evidence in enumerate(evidence_records, start=1):
+            claim_text = _first_sentence(evidence.passage)
+            claim = ClaimRecord(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                run_id=run_id,
+                report_revision=run.report_revision,
+                claim_id="CLM-" + _sha256_hex(
+                    f"{tenant_id}|{project_id}|{run_id}|{evidence.evidence_id}"
+                )[:16].upper(),
+                text=claim_text
+                or f"Evidence from {evidence.title} is available for review.",
+                material=True,
+                evidence_links=[
+                    EvidenceLink(
+                        evidence_id=evidence.evidence_id,
+                        relation=EvidenceRelation.SUPPORTS,
+                    )
+                ],
+                assertion_scope="single-origin",
+                confidence=0.0,
+                limitations=[
+                    "Local draft skeleton only; claim has not been independently reviewed."
+                ],
+                status="pending_review",
+            )
+            await run_service.record_claim(tenant_id, project_id, run_id, claim)
+            claims.append(claim)
+
+        references = [
+            {
+                "evidence_id": evidence.evidence_id,
+                "passage_id": evidence.passage_id,
+                "source_snapshot_id": evidence.source_snapshot_id,
+                "title": evidence.title,
+                "url": evidence.url,
+                "doi": evidence.doi,
+                "authors": evidence.authors,
+                "published_at": evidence.published_at,
+            }
+            for evidence in evidence_records
+        ]
+        draft = DraftReport(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            run_id=run_id,
+            report_revision=run.report_revision,
+            title=f"Draft: {run.research_request.title}",
+            abstract=(
+                f"Local draft skeleton based on {len(evidence_records)} eligible "
+                "evidence passage(s). This draft is not reviewed or release-ready."
+            ),
+            conclusions="\n".join(
+                f"- {claim.text} [evidence: {claim.evidence_links[0].evidence_id}]"
+                for claim in claims
+            ),
+            limitations=[
+                "Generated deterministically from stored evidence only.",
+                "No fact-checker, citation validator, critical reviewer, or safety reviewer has approved this draft.",
+                "The report cannot be released until mandatory review and approval gates exist.",
+            ],
+            contradictory_evidence=[],
+            references=references,
+        )
+        self.store.put(
+            "draft", tenant_id, project_id, run_id, draft.model_dump(mode="json")
+        )
+        return {"draft": draft, "claims": claims}
 
 
 def create_source_connector() -> SourceConnector:

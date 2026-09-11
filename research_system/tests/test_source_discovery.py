@@ -3,9 +3,9 @@
 import pytest
 
 from src.local_store import LocalStateStore
-from src.models import ResearchRequest
+from src.models import PeerReviewStatus, ResearchRequest, SourceType
 from src.services import EvidenceService, ResearchRunService
-from src.source_connectors import LocalSourceConnector, OpenAlexConnector
+from src.source_connectors import LocalSourceConnector, OpenAlexConnector, SourceRecord
 
 
 @pytest.mark.asyncio
@@ -50,6 +50,13 @@ async def test_planner_queries_become_scoped_evidence(tmp_path):
     assert all(item.run_id == run.run_id for item in result["sources"])
     assert all(item.run_id == run.run_id for item in result["evidence"])
     assert all(item.content_hash.startswith("sha256:") for item in result["evidence"])
+    assert all(item.source_snapshot_id for item in result["evidence"])
+    assert all(item.passage_id for item in result["evidence"])
+
+    snapshots = store.list("source_snapshot", "TEN-1", "PRJ-1", limit=10)
+    passages = store.list("passage", "TEN-1", "PRJ-1", limit=10)
+    assert len(snapshots) == 2
+    assert len(passages) == 2
 
     # A second ingestion is idempotent at the storage key/evidence ID level.
     repeated = await evidence_service.ingest_sources(
@@ -90,6 +97,60 @@ async def test_discovery_rejects_missing_or_cross_scope_runs(tmp_path):
     assert await service.discover_sources(
         "TEN-1", "PRJ-1", "RUN-MISSING", ["question"]
     ) == []
+
+
+@pytest.mark.asyncio
+async def test_discovery_deduplicates_sources_by_doi(tmp_path):
+    class DuplicateConnector:
+        name = "duplicate"
+
+        async def search(self, query, *, limit=20, date_range_start=None, date_range_end=None):
+            return [
+                SourceRecord(
+                    source_id="DUP-1",
+                    connector="duplicate",
+                    title="Same paper from provider A",
+                    url="https://example.test/a",
+                    source_type=SourceType.PAPER,
+                    abstract="First abstract about reliable evidence.",
+                    doi="10.1234/SAME",
+                    authors=["A"],
+                    peer_review_status=PeerReviewStatus.UNKNOWN,
+                ),
+                SourceRecord(
+                    source_id="DUP-2",
+                    connector="duplicate",
+                    title="Same paper from provider B",
+                    url="https://example.test/b",
+                    source_type=SourceType.PAPER,
+                    abstract="Second abstract about reliable evidence.",
+                    doi="https://doi.org/10.1234/same",
+                    authors=["B"],
+                    peer_review_status=PeerReviewStatus.UNKNOWN,
+                ),
+            ]
+
+    store = LocalStateStore(str(tmp_path / "dedup.db"))
+    run_service = ResearchRunService(store)
+    run = await run_service.create_run(
+        "TEN-1",
+        "PRJ-1",
+        ResearchRequest(
+            title="Dedup test",
+            primary_question="Do duplicate providers collapse?",
+            scope_description="Dedup",
+            max_sources=10,
+        ),
+    )
+    service = EvidenceService(store, connector=DuplicateConnector())
+
+    result = await service.discover_and_ingest_plan(
+        "TEN-1", "PRJ-1", run.run_id, {"search_queries": ["duplicates"]}
+    )
+
+    assert len(result["sources"]) == 1
+    assert len(result["evidence"]) == 1
+    assert result["sources"][0].metadata["canonical_source_id"].startswith("CAN-DOI-")
 
 
 def test_openalex_connector_maps_work_to_source(monkeypatch):

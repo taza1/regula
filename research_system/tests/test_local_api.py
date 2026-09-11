@@ -88,6 +88,15 @@ def test_project_run_and_mock_plan_survive_service_restart(tmp_path, monkeypatch
         assert executed.json()["source_count"] >= 1
         assert executed.json()["evidence_count"] >= 1
 
+        synthesized = client.post(
+            f"/api/v1/projects/{project_id}/runs/{run_id}/synthesize-local",
+            headers=headers,
+        )
+        assert synthesized.status_code == 200
+        assert synthesized.json()["state"] == "reviewing"
+        assert synthesized.json()["draft"]["references"]
+        assert synthesized.json()["claims"]
+
         searched = client.post(
             f"/api/v1/projects/{project_id}/runs/{run_id}/search",
             headers=headers,

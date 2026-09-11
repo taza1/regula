@@ -15,9 +15,10 @@ flowchart TD
     I --> J[Validate tenant, project, role, and run state]
     J --> K[Persist source records in SQLite]
     K --> L[Ingest abstracts/passages as evidence]
-    L --> M[Search evidence]
-    M --> N[Rank matching paper passages]
-    N --> O[Retrieve evidence by ID]
+    L --> M[Create cited draft skeleton and claim ledger]
+    M --> N[Search evidence]
+    N --> O[Rank matching paper passages]
+    O --> P[Retrieve evidence by ID]
 ```
 
 ## API sequence
@@ -31,15 +32,17 @@ The deprecated `tenant_id` query parameter is only accepted when it matches
 3. `POST /api/v1/projects/{project_id}/runs/{run_id}/plan`
 4. `POST /api/v1/projects/{project_id}/runs/{run_id}/confirm-scope`
 5. `POST /api/v1/projects/{project_id}/runs/{run_id}/execute-local`
-6. `POST /api/v1/projects/{project_id}/runs/{run_id}/evidence`
-7. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
-8. `GET /api/v1/projects/{project_id}/evidence/{evidence_id}`
+6. `POST /api/v1/projects/{project_id}/runs/{run_id}/synthesize-local`
+7. `POST /api/v1/projects/{project_id}/runs/{run_id}/evidence`
+8. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
+9. `GET /api/v1/projects/{project_id}/evidence/{evidence_id}`
 
 ## Current boundaries
 
-The local vertical slice is functional through source discovery, evidence
-ingestion, indexing, keyword search, local project membership checks, and legal
-run-state transitions. By default `execute-local` uses
+The local vertical slice is functional through source discovery, canonical source
+deduplication, source snapshots, passage records, evidence ingestion, claim-ledger
+draft skeletons, indexing, keyword search, local project membership checks, and
+legal run-state transitions. By default `execute-local` uses
 deterministic local fixtures and makes no external network calls. Set
 `SOURCE_CONNECTOR=openalex` or launch with
 `.\run_local.ps1 -SourceConnector openalex_with_local_fallback` to discover real
@@ -48,4 +51,5 @@ Cancelled and terminal runs cannot be revived by a later confirmation or worker
 call.
 
 Crossref, arXiv, governed crawling, background workers, report synthesis, and
-production Azure storage/search integrations are not yet connected.
+production Azure storage/search integrations are not yet connected. The local
+draft skeleton is not a reviewed or release-ready report.

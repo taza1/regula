@@ -187,6 +187,8 @@ class EvidenceRecord(BaseModel):
     report_revision: int
     evidence_id: str
     source_id: str
+    source_snapshot_id: Optional[str] = None
+    passage_id: Optional[str] = None
     source_type: SourceType
     title: str
     url: str
@@ -206,6 +208,49 @@ class EvidenceRecord(BaseModel):
     quality_assessment_id: Optional[str] = None
     eligibility_status: EligibilityStatus
     policy_version: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SourceSnapshotRecord(BaseModel):
+    """Immutable local snapshot of provider metadata and available source text."""
+    model_config = ConfigDict(from_attributes=True)
+
+    schema_version: SchemaVersion = SchemaVersion.V1_0
+    tenant_id: str
+    project_id: str
+    run_id: str
+    snapshot_id: str
+    source_id: str
+    canonical_source_id: str
+    provider: str
+    url: str
+    doi: Optional[str] = None
+    retrieved_at: datetime
+    content_hash: str
+    raw_metadata: Dict[str, Any] = Field(default_factory=dict)
+    text: str
+    storage_uri: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PassageRecord(BaseModel):
+    """Citation-addressable passage derived from a source snapshot."""
+    model_config = ConfigDict(from_attributes=True)
+
+    schema_version: SchemaVersion = SchemaVersion.V1_0
+    tenant_id: str
+    project_id: str
+    run_id: str
+    passage_id: str
+    source_id: str
+    source_snapshot_id: str
+    canonical_source_id: str
+    section: Optional[str] = None
+    page: Optional[int] = None
+    offset_start: Optional[int] = None
+    offset_end: Optional[int] = None
+    text: str
+    content_hash: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

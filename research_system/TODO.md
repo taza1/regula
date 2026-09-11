@@ -11,6 +11,7 @@
 - [x] Add OpenAlex paper discovery with latest-query recency handling
 - [x] Add ranked local evidence search
 - [x] Add local auth headers, project membership checks, and legal run-state transitions
+- [x] Add canonical source deduplication, local snapshots, passage records, draft skeleton, and claim ledger
 - [x] Add Python and Playwright test coverage
 - [x] Add local and Azure launcher scripts
 
@@ -27,9 +28,9 @@
 
 - [ ] Download HTML and PDF documents
 - [ ] Extract clean text and passages
-- [ ] Calculate content hashes and detect duplicates
-- [ ] Store source metadata and raw artifacts
-- [ ] Add passage-level metadata and citation references
+- [x] Calculate content hashes and detect local source duplicates
+- [x] Store source metadata and local snapshot artifacts
+- [x] Add abstract-level passage metadata and citation references
 
 ## Search and research generation
 
@@ -37,7 +38,8 @@
 - [ ] Add embeddings and vector retrieval
 - [ ] Add Azure AI Search adapter
 - [ ] Implement background run workers
-- [ ] Generate evidence-backed claims and reports
+- [x] Generate deterministic local claim ledger and draft skeleton
+- [ ] Generate reviewed evidence-backed reports
 - [ ] Add contradictory-evidence searches
 
 ## Review, security, and operations

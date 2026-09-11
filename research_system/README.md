@@ -6,9 +6,9 @@ This is an early implementation of the multi-agent research plan. The local vert
 
 ### Current implementation status
 
-- Working: health/OpenAPI, local project and run persistence, local auth headers and project membership checks, planner agent, legal run-state checks, scope confirmation, OpenAlex paper discovery, local evidence ingestion/search, provider status, and guarded 401/403/404/409/502 errors.
+- Working: health/OpenAPI, local project and run persistence, local auth headers and project membership checks, planner agent, legal run-state checks, scope confirmation, OpenAlex paper discovery, source snapshots, passage records, local evidence ingestion/search, deterministic draft skeleton, claim ledger, provider status, and guarded 401/403/404/409/502 errors.
 - Azure-verified: direct `gpt-5.6-sol` planner inference through `DefaultAzureCredential`; no Azure API key is stored.
-- Still scaffolded: Crossref/arXiv, crawling, Blob Storage, AI Search, Cosmos DB, Service Bus, retrieval/synthesis/review agents, authenticated authorization, and the production release protocol.
+- Still scaffolded: Crossref/arXiv, crawling, Blob Storage, AI Search, Cosmos DB, Service Bus, LLM synthesis/review agents, production Entra authorization, and the production release protocol.
 - The release endpoint returns `501 Not Implemented` until verified artifacts, authenticated approval, and conditional commit exist; this prototype never claims a report was published.
 
 ## Architecture
@@ -146,6 +146,8 @@ This is an early implementation of the multi-agent research plan. The local vert
 - `GET /api/v1/projects/{project_id}/runs/{run_id}` - Get run status
 - `POST /api/v1/projects/{project_id}/runs/{run_id}/plan` - Generate and persist a research plan
 - `POST /api/v1/projects/{project_id}/runs/{run_id}/confirm-scope` - Confirm research scope
+- `POST /api/v1/projects/{project_id}/runs/{run_id}/execute-local` - Discover and ingest local/OpenAlex evidence
+- `POST /api/v1/projects/{project_id}/runs/{run_id}/synthesize-local` - Create a local cited draft skeleton and claim ledger
 - `POST /api/v1/projects/{project_id}/runs/{run_id}/cancel` - Cancel run
 
 ### Approvals & Release
@@ -195,9 +197,11 @@ Use Swagger in this sequence:
 3. `POST /api/v1/projects/{project_id}/runs/{run_id}/plan`
 4. `POST /api/v1/projects/{project_id}/runs/{run_id}/confirm-scope`
 5. `POST /api/v1/projects/{project_id}/runs/{run_id}/execute-local`
-6. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
+6. `POST /api/v1/projects/{project_id}/runs/{run_id}/synthesize-local`
+7. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
 
 For questions like `What is the latest on AI?`, the OpenAlex connector searches recent works newest-first and caps the inferred recency window at today's date unless you provide an explicit date range on the run.
+`synthesize-local` creates a draft skeleton and claim ledger for review; it is not fact-checked, approved, or release-ready.
 Cancelled or terminal runs cannot be confirmed or executed again; create a new run for a retry.
 
 ### Azure model inference from the local API
@@ -291,7 +295,7 @@ npm run test:e2e
 ## Security Considerations
 
 1. **Implemented for model access**: Microsoft Entra tokens via `DefaultAzureCredential`; no Azure API key is stored.
-2. **Local-only boundary**: SQLite lookups include tenant and project identifiers, but API authentication and production authorization are not implemented.
+2. **Local-only boundary**: local development uses `X-Tenant-Id` and `X-User-Id` headers; production Entra authorization is not implemented.
 3. **Planned controls**: managed identity, Cosmos isolation, Key Vault, private networking, source-policy enforcement, and complete audit records remain future work.
 
 ## Next Steps for Implementation
@@ -306,6 +310,7 @@ npm run test:e2e
 ### Phase 2: Agent Implementation
 - [ ] LLM integration for Planner and Synthesis agents
 - [x] OpenAlex connector
+- [x] Local source snapshots, passage records, draft skeleton, and claim ledger
 - [ ] Crossref and arXiv connectors
 - [ ] Web crawler with robots.txt compliance
 - [ ] PDF and HTML extraction
