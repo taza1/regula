@@ -3,6 +3,7 @@
 from typing import Optional, List, Dict, Any, TypedDict
 from datetime import datetime
 import hashlib
+import re
 import uuid
 from abc import ABC, abstractmethod
 
@@ -13,7 +14,13 @@ from src.models import (
 )
 from src.config import get_research_config, get_azure_config
 from src.local_store import LocalStateStore
-from src.source_connectors import LocalSourceConnector, SourceConnector, SourceRecord
+from src.source_connectors import (
+    FallbackSourceConnector,
+    LocalSourceConnector,
+    OpenAlexConnector,
+    SourceConnector,
+    SourceRecord,
+)
 
 
 class DiscoveryIngestionResult(TypedDict):
@@ -453,9 +460,7 @@ class EvidenceService:
         connector: Optional[SourceConnector] = None,
     ):
         self.store = store or _default_store()
-        # Local is the only default.  A remote connector must be explicitly
-        # injected by a future deployment after its policy is configured.
-        self.connector = connector or LocalSourceConnector()
+        self.connector = connector or create_source_connector()
 
     async def discover_sources(
         self,
@@ -491,7 +496,12 @@ class EvidenceService:
             remaining = total_limit - len(sources)
             if remaining <= 0:
                 break
-            discovered = await self.connector.search(query, limit=remaining)
+            discovered = await self.connector.search(
+                query,
+                limit=remaining,
+                date_range_start=run.research_request.date_range_start,
+                date_range_end=run.research_request.date_range_end,
+            )
             for source in discovered:
                 if source.source_id in seen_ids:
                     continue
@@ -652,18 +662,23 @@ class EvidenceService:
         """Search evidence with hybrid retrieval."""
         if not query.strip():
             return []
-        terms = [term.lower() for term in query.split() if term.strip()]
+        terms = [
+            term
+            for term in re.findall(r"[a-z0-9]{2,}", query.casefold())
+            if term.strip()
+        ]
         candidates = self.store.list("evidence", tenant_id, project_id, limit=1000)
         ranked: list[tuple[int, EvidenceRecord]] = []
         for payload in candidates:
             evidence = EvidenceRecord.model_validate(payload)
             if evidence.run_id != run_id or evidence.source_use_decision.value != "allowed":
                 continue
-            haystack = " ".join(
+            haystack_text = " ".join(
                 [evidence.title, evidence.passage, evidence.url, evidence.doi or ""]
                 + evidence.authors
-            ).lower()
-            score = sum(haystack.count(term) for term in terms)
+            ).casefold()
+            haystack_tokens = re.findall(r"[a-z0-9]{2,}", haystack_text)
+            score = sum(haystack_tokens.count(term) for term in terms)
             if score:
                 ranked.append((score, evidence))
         ranked.sort(key=lambda item: (-item[0], item[1].created_at))
@@ -702,3 +717,31 @@ class EvidenceService:
                 evidence.model_dump(mode="json"),
             )
         return True
+
+
+def create_source_connector() -> SourceConnector:
+    """Create the configured source connector for local development."""
+
+    config = get_research_config()
+    provider = config.source_connector.strip().lower()
+    if provider == "local":
+        return LocalSourceConnector()
+    if provider == "openalex":
+        return OpenAlexConnector(
+            base_url=config.openalex_base_url,
+            mailto=config.openalex_mailto,
+            timeout_seconds=config.openalex_timeout_seconds,
+            latest_query_days=config.latest_query_days,
+        )
+    if provider == "openalex_with_local_fallback":
+        return FallbackSourceConnector(
+            OpenAlexConnector(
+                base_url=config.openalex_base_url,
+                mailto=config.openalex_mailto,
+                timeout_seconds=config.openalex_timeout_seconds,
+                latest_query_days=config.latest_query_days,
+            )
+        )
+    raise ValueError(
+        "SOURCE_CONNECTOR must be one of: local, openalex, openalex_with_local_fallback"
+    )

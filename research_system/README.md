@@ -2,13 +2,13 @@
 
 ## Overview
 
-This is an early implementation of the multi-agent research plan. The local vertical slice persists projects and runs in SQLite, generates and stores a bounded research plan, and requires scope confirmation before queueing. The planner can run deterministically offline or call an Azure model with Microsoft Entra authentication.
+This is an early implementation of the multi-agent research plan. The local vertical slice persists projects and runs in SQLite, generates and stores a bounded research plan, requires scope confirmation before queueing, and can discover/search paper metadata through OpenAlex. The planner can run deterministically offline or call an Azure model with Microsoft Entra authentication.
 
 ### Current implementation status
 
-- Working: health/OpenAPI, local project and run persistence, planner agent, scope confirmation, provider status, and guarded 404/409/502 errors.
+- Working: health/OpenAPI, local project and run persistence, planner agent, scope confirmation, OpenAlex paper discovery, local evidence ingestion/search, provider status, and guarded 404/409/502 errors.
 - Azure-verified: direct `gpt-5.6-sol` planner inference through `DefaultAzureCredential`; no Azure API key is stored.
-- Still scaffolded: source connectors, crawling, Blob Storage, AI Search, Cosmos DB, Service Bus, retrieval/synthesis/review agents, authenticated authorization, and the production release protocol.
+- Still scaffolded: Crossref/arXiv, crawling, Blob Storage, AI Search, Cosmos DB, Service Bus, retrieval/synthesis/review agents, authenticated authorization, and the production release protocol.
 - The release endpoint returns `501 Not Implemented` until verified artifacts, authenticated approval, and conditional commit exist; this prototype never claims a report was published.
 
 ## Architecture
@@ -173,6 +173,23 @@ pip install -r requirements.txt
 
 The API is available at `http://127.0.0.1:8000`; Swagger is at `/docs`. This mode uses SQLite and a deterministic planner, so it does not send data or incur model usage.
 
+To discover real research papers through OpenAlex while keeping the planner mocked:
+
+```powershell
+.\run_local.ps1 -SourceConnector openalex_with_local_fallback
+```
+
+Use Swagger in this sequence:
+
+1. `POST /api/v1/projects`
+2. `POST /api/v1/projects/{project_id}/runs`
+3. `POST /api/v1/projects/{project_id}/runs/{run_id}/plan`
+4. `POST /api/v1/projects/{project_id}/runs/{run_id}/confirm-scope`
+5. `POST /api/v1/projects/{project_id}/runs/{run_id}/execute-local`
+6. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
+
+For questions like `What is the latest on AI?`, the OpenAlex connector searches recent works newest-first and caps the inferred recency window at today's date unless you provide an explicit date range on the run.
+
 ### Azure model inference from the local API
 
 Sign in with `az login`, then run:
@@ -188,6 +205,12 @@ The launcher uses the existing `gpt-5.6-sol` default for this checkout. Override
 ```
 
 Locally, `DefaultAzureCredential` uses the Azure CLI session. In Azure hosting it can use managed identity. The model-backed operation is `POST /api/v1/projects/{project_id}/runs/{run_id}/plan`.
+
+You can combine Azure planning with OpenAlex discovery:
+
+```powershell
+.\run_azure.ps1 -SourceConnector openalex_with_local_fallback
+```
 
 ### Docker Deployment
 
@@ -272,7 +295,8 @@ npm run test:e2e
 
 ### Phase 2: Agent Implementation
 - [ ] LLM integration for Planner and Synthesis agents
-- [ ] OpenAlex, Crossref, arXiv connectors
+- [x] OpenAlex connector
+- [ ] Crossref and arXiv connectors
 - [ ] Web crawler with robots.txt compliance
 - [ ] PDF and HTML extraction
 - [ ] Passage-level citation tracking

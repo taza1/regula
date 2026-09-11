@@ -102,6 +102,29 @@ class ResearchConfig(BaseSettings):
     max_budget_usd: float = Field(default=100.0, description="Default max budget in USD")
     
     # Source discovery limits
+    source_connector: str = Field(
+        default="local",
+        description="Source connector: local, openalex, or openalex_with_local_fallback",
+    )
+    openalex_base_url: str = Field(
+        default="https://api.openalex.org",
+        description="OpenAlex API base URL",
+    )
+    openalex_mailto: str = Field(
+        default="",
+        description="Optional email for OpenAlex polite pool requests",
+    )
+    openalex_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        description="Timeout for OpenAlex source discovery requests",
+    )
+    latest_query_days: int = Field(
+        default=180,
+        ge=1,
+        le=3650,
+        description="Default recency window for broad latest/current research queries",
+    )
     max_sources_per_query: int = Field(default=50, description="Max sources per search query")
     max_total_sources: int = Field(default=100, description="Max total sources per run")
     max_crawl_depth: int = Field(default=3, description="Max crawl depth for web pages")

@@ -5,7 +5,7 @@ import pytest
 from src.local_store import LocalStateStore
 from src.models import ResearchRequest
 from src.services import EvidenceService, ResearchRunService
-from src.source_connectors import LocalSourceConnector
+from src.source_connectors import LocalSourceConnector, OpenAlexConnector
 
 
 @pytest.mark.asyncio
@@ -90,3 +90,132 @@ async def test_discovery_rejects_missing_or_cross_scope_runs(tmp_path):
     assert await service.discover_sources(
         "TEN-1", "PRJ-1", "RUN-MISSING", ["question"]
     ) == []
+
+
+def test_openalex_connector_maps_work_to_source(monkeypatch):
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": [
+                    {
+                        "id": "https://openalex.org/W123",
+                        "doi": "https://doi.org/10.1234/example",
+                        "display_name": "Recent advances in AI agents",
+                        "type": "article",
+                        "publication_date": "2026-08-15",
+                        "publication_year": 2026,
+                        "cited_by_count": 12,
+                        "abstract_inverted_index": {
+                            "AI": [0],
+                            "agents": [1],
+                            "coordinate": [2],
+                            "tools": [3],
+                        },
+                        "authorships": [
+                            {"author": {"display_name": "Ada Lovelace"}},
+                            {"author": {"display_name": "Grace Hopper"}},
+                        ],
+                        "primary_location": {
+                            "landing_page_url": "https://example.org/paper",
+                            "source": {"display_name": "Journal of AI"},
+                        },
+                        "open_access": {"license": "cc-by"},
+                    }
+                ]
+            }
+
+    def fake_get(url, params, timeout, headers):
+        captured["url"] = url
+        captured["params"] = params
+        captured["timeout"] = timeout
+        captured["headers"] = headers
+        return Response()
+
+    monkeypatch.setattr("src.source_connectors.requests.get", fake_get)
+
+    connector = OpenAlexConnector(
+        base_url="https://api.openalex.org",
+        mailto="researcher@example.test",
+        latest_query_days=90,
+    )
+
+    sources = connector.search_sync("latest on AI", limit=5)
+
+    assert captured["url"] == "https://api.openalex.org/works"
+    assert captured["params"]["search"] == "latest on AI"
+    assert captured["params"]["sort"] == "publication_date:desc"
+    assert "from_publication_date:" in captured["params"]["filter"]
+    assert sources[0].connector == "openalex"
+    assert sources[0].source_id.startswith("OPENALEX-")
+    assert sources[0].title == "Recent advances in AI agents"
+    assert sources[0].doi == "10.1234/example"
+    assert sources[0].authors == ["Ada Lovelace", "Grace Hopper"]
+    assert sources[0].passage == "AI agents coordinate tools"
+    assert sources[0].metadata["source_display_name"] == "Journal of AI"
+
+
+@pytest.mark.asyncio
+async def test_openalex_sources_become_searchable_paper_evidence(tmp_path, monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": [
+                    {
+                        "id": "https://openalex.org/W456",
+                        "display_name": "AI evaluation trends in 2026",
+                        "type": "article",
+                        "publication_date": "2026-07-01",
+                        "abstract_inverted_index": {
+                            "Evaluation": [0],
+                            "benchmarks": [1],
+                            "track": [2],
+                            "AI": [3],
+                            "progress": [4],
+                        },
+                        "authorships": [
+                            {"author": {"display_name": "Research Author"}}
+                        ],
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(
+        "src.source_connectors.requests.get",
+        lambda *args, **kwargs: Response(),
+    )
+    store = LocalStateStore(str(tmp_path / "openalex.db"))
+    run_service = ResearchRunService(store)
+    run = await run_service.create_run(
+        "TEN-1",
+        "PRJ-1",
+        ResearchRequest(
+            title="Latest AI",
+            primary_question="What is the latest on AI?",
+            scope_description="Recent papers",
+            max_sources=2,
+        ),
+    )
+    service = EvidenceService(store, connector=OpenAlexConnector())
+
+    result = await service.discover_and_ingest_plan(
+        "TEN-1",
+        "PRJ-1",
+        run.run_id,
+        {"search_queries": ["latest on AI"]},
+    )
+    found = await service.search_evidence(
+        "TEN-1", "PRJ-1", run.run_id, "benchmarks AI"
+    )
+
+    assert result["sources"][0].source_type.value == "paper"
+    assert result["sources"][0].connector == "openalex"
+    assert result["evidence"][0].title == "AI evaluation trends in 2026"
+    assert found[0].source_id == result["sources"][0].source_id

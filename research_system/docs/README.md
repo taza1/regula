@@ -10,6 +10,8 @@ The project documentation is grouped as follows:
 - [`../PROJECT_FLOW.md`](../PROJECT_FLOW.md) - current API and evidence flow
 - [`../IMPLEMENTATION_GUIDE.md`](../IMPLEMENTATION_GUIDE.md) - implementation phases
 - [`../TODO.md`](../TODO.md) - completed work and remaining roadmap
+- [`AZURE_DELIVERY_PLAN.md`](AZURE_DELIVERY_PLAN.md) - reviewed Azure migration and end-to-end delivery plan
+- [`AZURE_TASK_BREAKDOWN.md`](AZURE_TASK_BREAKDOWN.md) - execution waves, task mapping, and acceptance matrix
 
 The source code is in [`../src/`](../src/) and automated tests are in
 [`../tests/`](../tests/).

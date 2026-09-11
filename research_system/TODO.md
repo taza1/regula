@@ -8,13 +8,14 @@
 - [x] Persist local state in SQLite
 - [x] Persist tenant/project/run-scoped evidence
 - [x] Add deterministic offline source discovery and ingestion
+- [x] Add OpenAlex paper discovery with latest-query recency handling
 - [x] Add ranked local evidence search
 - [x] Add Python and Playwright test coverage
 - [x] Add local and Azure launcher scripts
 
 ## Next milestone: real source discovery
 
-- [ ] Add OpenAlex connector
+- [x] Add OpenAlex connector
 - [ ] Add Crossref connector
 - [ ] Add arXiv connector
 - [ ] Normalize source metadata and identifiers
