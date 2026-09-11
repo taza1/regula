@@ -1,7 +1,8 @@
 """FastAPI application for the research system."""
 
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException
+from datetime import datetime
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -9,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from src.config import get_api_config, get_azure_config, get_model_config
 from src.models import (
-    RunState, ResearchRequest, RunRecord, ProjectModel,
+    ProjectMembership, RunState, ResearchRequest, RunRecord, ProjectModel,
     EvidenceRecord, ClaimRecord, ReviewFinding
 )
 from src.services import (
@@ -143,6 +144,62 @@ class IndexEvidenceRequest(BaseModel):
     evidence: EvidenceRecord
 
 
+class AuthContext(BaseModel):
+    """Local development auth context, replaceable by Entra validation later."""
+
+    tenant_id: str
+    user_id: str
+
+
+async def get_auth_context(
+    x_tenant_id: str = Header(..., alias="X-Tenant-Id"),
+    x_user_id: str = Header("local-user", alias="X-User-Id"),
+) -> AuthContext:
+    """Read the local caller identity from headers instead of query strings."""
+
+    tenant = x_tenant_id.strip()
+    user = x_user_id.strip()
+    if not tenant or not user:
+        raise HTTPException(status_code=401, detail="Missing local auth headers")
+    return AuthContext(tenant_id=tenant, user_id=user)
+
+
+def _validate_tenant_query(tenant_id: Optional[str], auth: AuthContext) -> str:
+    """Reject mismatches while old clients migrate away from tenant_id query."""
+
+    if tenant_id is not None and tenant_id != auth.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant header/query mismatch")
+    return auth.tenant_id
+
+
+async def _require_project_role(
+    tenant_id: str,
+    project_id: str,
+    user_id: str,
+    roles: list[ProjectMembership],
+) -> None:
+    allowed = await project_service.verify_user_any_role(
+        tenant_id,
+        project_id,
+        user_id,
+        [role.value for role in roles],
+    )
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Project role required")
+
+
+def _parse_optional_datetime(value: Optional[str], field_name: str) -> Optional[datetime]:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be an ISO-8601 datetime or date",
+        ) from error
+
+
 # ============================================================================
 # Health and System Endpoints
 # ============================================================================
@@ -187,16 +244,16 @@ async def model_status():
 
 @app.post("/api/v1/projects")
 async def create_project(
-    tenant_id: str,
-    request: CreateProjectRequest
+    request: CreateProjectRequest,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Create a new research project."""
     try:
-        # TODO: Get authenticated user and verify tenant access
-        user_id = "user-123"  # Placeholder
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
         
         project = await project_service.create_project(
-            tenant_id=tenant_id,
+            tenant_id=scoped_tenant_id,
             name=request.name,
             description=request.description or "",
             max_budget_usd=request.max_budget_usd
@@ -204,24 +261,45 @@ async def create_project(
         
         # Add creator as admin
         await project_service.add_member(
-            tenant_id, project.project_id, user_id, ["admin"]
+            scoped_tenant_id,
+            project.project_id,
+            auth.user_id,
+            ["admin", "researcher", "reviewer", "publisher"],
         )
         
         return {
             "project": project.model_dump(mode='json'),
             "message": "Project created successfully"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/v1/projects/{project_id}")
-async def get_project(tenant_id: str, project_id: str):
+async def get_project(
+    project_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get project details."""
     try:
-        project = await project_service.get_project(tenant_id, project_id)
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        project = await project_service.get_project(scoped_tenant_id, project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [
+                ProjectMembership.RESEARCHER,
+                ProjectMembership.REVIEWER,
+                ProjectMembership.PUBLISHER,
+                ProjectMembership.ADMIN,
+            ],
+        )
         return project.model_dump(mode='json')
     except HTTPException:
         raise
@@ -235,20 +313,34 @@ async def get_project(tenant_id: str, project_id: str):
 
 @app.post("/api/v1/projects/{project_id}/runs")
 async def create_research_run(
-    tenant_id: str,
     project_id: str,
-    request: CreateRunRequest
+    request: CreateRunRequest,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Create a new research run."""
     try:
-        project = await project_service.get_project(tenant_id, project_id)
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        project = await project_service.get_project(scoped_tenant_id, project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN],
+        )
         
         research_request = ResearchRequest(
             title=request.title,
             primary_question=request.primary_question,
             scope_description=request.scope_description,
+            date_range_start=_parse_optional_datetime(
+                request.date_range_start, "date_range_start"
+            ),
+            date_range_end=_parse_optional_datetime(
+                request.date_range_end, "date_range_end"
+            ),
             languages=request.languages,
             approved_source_domains=request.approved_source_domains,
             max_sources=request.max_sources,
@@ -256,7 +348,7 @@ async def create_research_run(
         )
         
         run = await run_service.create_run(
-            tenant_id, project_id, research_request
+            scoped_tenant_id, project_id, research_request
         )
         
         return {
@@ -271,13 +363,26 @@ async def create_research_run(
 
 @app.get("/api/v1/projects/{project_id}/runs/{run_id}")
 async def get_research_run(
-    tenant_id: str,
     project_id: str,
-    run_id: str
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get research run details."""
     try:
-        run = await run_service.get_run(tenant_id, project_id, run_id)
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [
+                ProjectMembership.RESEARCHER,
+                ProjectMembership.REVIEWER,
+                ProjectMembership.PUBLISHER,
+                ProjectMembership.ADMIN,
+            ],
+        )
+        run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
         return run.model_dump(mode='json')
@@ -288,9 +393,21 @@ async def get_research_run(
 
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/plan")
-async def plan_research_run(tenant_id: str, project_id: str, run_id: str):
+async def plan_research_run(
+    project_id: str,
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Run the planner agent and persist its bounded plan before confirmation."""
-    run = await run_service.get_run(tenant_id, project_id, run_id)
+    scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+    await _require_project_role(
+        scoped_tenant_id,
+        project_id,
+        auth.user_id,
+        [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN],
+    )
+    run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.state != RunState.AWAITING_SCOPE_CONFIRMATION:
@@ -301,7 +418,7 @@ async def plan_research_run(tenant_id: str, project_id: str, run_id: str):
     message = AgentMessage(
         agent_role=AgentRole.PLANNER,
         run_id=run_id,
-        tenant_id=tenant_id,
+        tenant_id=scoped_tenant_id,
         project_id=project_id,
         input_payload={
             "research_request": run.research_request.model_dump(mode="json")
@@ -319,7 +436,7 @@ async def plan_research_run(tenant_id: str, project_id: str, run_id: str):
             detail=result.error_message or "Planner returned an invalid result",
         )
     await run_service.save_research_plan(
-        tenant_id, project_id, run_id, result.output_payload
+        scoped_tenant_id, project_id, run_id, result.output_payload
     )
     return {
         "run_id": run_id,
@@ -331,26 +448,41 @@ async def plan_research_run(tenant_id: str, project_id: str, run_id: str):
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/confirm-scope")
 async def confirm_research_scope(
-    tenant_id: str,
     project_id: str,
     run_id: str,
-    request: ConfirmScopeRequest
+    request: ConfirmScopeRequest,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Confirm research scope before execution."""
     try:
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN],
+        )
         if not request.confirmed:
-            await run_service.cancel_run(
-                tenant_id, project_id, run_id,
+            success = await run_service.cancel_run(
+                scoped_tenant_id, project_id, run_id,
                 reason=request.reason or "Scope not confirmed"
             )
+            if not success:
+                raise HTTPException(status_code=409, detail="Failed to cancel run")
             return {
                 "message": "Research run cancelled",
                 "run_id": run_id
             }
 
-        run = await run_service.get_run(tenant_id, project_id, run_id)
+        run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
+        if run.state != RunState.AWAITING_SCOPE_CONFIRMATION:
+            raise HTTPException(
+                status_code=409,
+                detail="Scope can only be confirmed while awaiting confirmation",
+            )
         if not run.research_plan:
             raise HTTPException(
                 status_code=409,
@@ -359,8 +491,9 @@ async def confirm_research_scope(
         
         # Transition to queued state
         success = await run_service.update_run_state(
-            tenant_id, project_id, run_id,
-            RunState.QUEUED
+            scoped_tenant_id, project_id, run_id,
+            RunState.QUEUED,
+            expected_state=RunState.AWAITING_SCOPE_CONFIRMATION,
         )
         
         if not success:
@@ -378,13 +511,21 @@ async def confirm_research_scope(
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/execute-local")
 async def execute_local_research(
-    tenant_id: str,
     project_id: str,
     run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Run the deterministic offline discovery and ingestion pipeline."""
     try:
-        run = await run_service.get_run(tenant_id, project_id, run_id)
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN],
+        )
+        run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
         if run.state != RunState.QUEUED:
@@ -399,12 +540,16 @@ async def execute_local_research(
             )
 
         if not await run_service.update_run_state(
-            tenant_id, project_id, run_id, RunState.COLLECTING
+            scoped_tenant_id,
+            project_id,
+            run_id,
+            RunState.COLLECTING,
+            expected_state=RunState.QUEUED,
         ):
             raise HTTPException(status_code=409, detail="Failed to start local execution")
 
         result = await evidence_service.discover_and_ingest_plan(
-            tenant_id, project_id, run_id, run.research_plan
+            scoped_tenant_id, project_id, run_id, run.research_plan
         )
         return {
             "run_id": run_id,
@@ -423,14 +568,22 @@ async def execute_local_research(
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/cancel")
 async def cancel_research_run(
-    tenant_id: str,
     project_id: str,
-    run_id: str
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Cancel a research run."""
     try:
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN],
+        )
         success = await run_service.cancel_run(
-            tenant_id, project_id, run_id,
+            scoped_tenant_id, project_id, run_id,
             reason="User requested cancellation"
         )
         
@@ -453,14 +606,22 @@ async def cancel_research_run(
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/request-approval")
 async def request_approval(
-    tenant_id: str,
     project_id: str,
     run_id: str,
-    request: RequestApprovalRequest
+    request: RequestApprovalRequest,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Request approval for a report."""
     try:
-        run = await run_service.get_run(tenant_id, project_id, run_id)
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [ProjectMembership.PUBLISHER, ProjectMembership.ADMIN],
+        )
+        run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
         if run.state != RunState.AWAITING_APPROVAL:
@@ -469,13 +630,10 @@ async def request_approval(
                 detail="Run is not awaiting approval; release remains blocked",
             )
 
-        # TODO: Replace with authenticated Publisher identity.
-        approver_id = "publisher-123"  # Placeholder
-        
         approval = await approval_service.request_approval(
-            tenant_id, project_id, run_id,
+            scoped_tenant_id, project_id, run_id,
             report_revision=1,
-            approver_id=approver_id
+            approver_id=auth.user_id
         )
         
         if not approval:
@@ -493,12 +651,20 @@ async def request_approval(
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/release")
 async def release_report(
-    tenant_id: str,
     project_id: str,
     run_id: str,
-    request: ReleaseReportRequest
+    request: ReleaseReportRequest,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Release an approved report for internal publication."""
+    scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+    await _require_project_role(
+        scoped_tenant_id,
+        project_id,
+        auth.user_id,
+        [ProjectMembership.PUBLISHER, ProjectMembership.ADMIN],
+    )
     raise HTTPException(
         status_code=501,
         detail=(
@@ -510,20 +676,26 @@ async def release_report(
 
 @app.post("/api/v1/releases/{release_id}/withdraw")
 async def withdraw_release(
-    tenant_id: str,
-    project_id: str,
     release_id: str,
-    request: WithdrawReleaseRequest
+    request: WithdrawReleaseRequest,
+    project_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Withdraw a published release."""
     try:
-        # TODO: Get authenticated publisher
-        withdrawn_by = "publisher-123"  # Placeholder
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [ProjectMembership.PUBLISHER, ProjectMembership.ADMIN],
+        )
         
         success = await release_service.withdraw_release(
-            tenant_id, project_id, release_id,
+            scoped_tenant_id, project_id, release_id,
             reason=request.reason,
-            withdrawn_by=withdrawn_by
+            withdrawn_by=auth.user_id
         )
         
         if not success:
@@ -545,15 +717,28 @@ async def withdraw_release(
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/search")
 async def search_evidence(
-    tenant_id: str,
     project_id: str,
     run_id: str,
-    request: SearchEvidenceRequest
+    request: SearchEvidenceRequest,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Search evidence for a research run."""
     try:
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [
+                ProjectMembership.RESEARCHER,
+                ProjectMembership.REVIEWER,
+                ProjectMembership.PUBLISHER,
+                ProjectMembership.ADMIN,
+            ],
+        )
         results = await evidence_service.search_evidence(
-            tenant_id, project_id, run_id,
+            scoped_tenant_id, project_id, run_id,
             query=request.query,
             search_type=request.search_type,
             limit=request.limit,
@@ -569,23 +754,31 @@ async def search_evidence(
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/evidence")
 async def index_evidence(
-    tenant_id: str,
     project_id: str,
     run_id: str,
     request: IndexEvidenceRequest,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Store one evidence passage in the local searchable evidence index."""
+    scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+    await _require_project_role(
+        scoped_tenant_id,
+        project_id,
+        auth.user_id,
+        [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN],
+    )
     evidence = request.evidence
     if (
-        evidence.tenant_id != tenant_id
+        evidence.tenant_id != scoped_tenant_id
         or evidence.project_id != project_id
         or evidence.run_id != run_id
     ):
         raise HTTPException(status_code=400, detail="Evidence scope does not match request path")
-    if not await run_service.get_run(tenant_id, project_id, run_id):
+    if not await run_service.get_run(scoped_tenant_id, project_id, run_id):
         raise HTTPException(status_code=404, detail="Research run not found")
     if not await evidence_service.index_evidence(
-        tenant_id, project_id, run_id, [evidence]
+        scoped_tenant_id, project_id, run_id, [evidence]
     ):
         raise HTTPException(status_code=409, detail="Evidence could not be indexed")
     return {"evidence": evidence.model_dump(mode="json"), "message": "Evidence indexed"}
@@ -593,14 +786,27 @@ async def index_evidence(
 
 @app.get("/api/v1/projects/{project_id}/evidence/{evidence_id}")
 async def get_evidence(
-    tenant_id: str,
     project_id: str,
-    evidence_id: str
+    evidence_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get evidence details."""
     try:
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id,
+            project_id,
+            auth.user_id,
+            [
+                ProjectMembership.RESEARCHER,
+                ProjectMembership.REVIEWER,
+                ProjectMembership.PUBLISHER,
+                ProjectMembership.ADMIN,
+            ],
+        )
         evidence = await evidence_service.get_evidence(
-            tenant_id, project_id, evidence_id
+            scoped_tenant_id, project_id, evidence_id
         )
         
         if not evidence:

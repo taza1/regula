@@ -10,6 +10,7 @@
 - [x] Add deterministic offline source discovery and ingestion
 - [x] Add OpenAlex paper discovery with latest-query recency handling
 - [x] Add ranked local evidence search
+- [x] Add local auth headers, project membership checks, and legal run-state transitions
 - [x] Add Python and Playwright test coverage
 - [x] Add local and Azure launcher scripts
 

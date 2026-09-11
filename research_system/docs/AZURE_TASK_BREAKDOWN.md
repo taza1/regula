@@ -85,8 +85,9 @@ These are the first implementation tickets I would open:
 
 | Priority | Ticket | Depends on | Done when |
 | --- | --- | --- | --- |
-| P0 | Replace query-string tenant/user trust with an auth context dependency and local dev identity adapter. | TASK-002, TASK-003 | Direct cross-tenant API calls fail in tests. |
-| P0 | Add legal run transition table and epoch/revision checks. | TASK-002, TASK-017 | Confirming, cancelling, retrying, and worker completion cannot revive terminal runs. |
+| Done | Replace query-string tenant/user trust with an auth context dependency and local dev identity adapter. | TASK-002, TASK-003 | Direct cross-tenant API calls fail in tests. |
+| Done | Add legal run transition table and local revision checks. | TASK-002, TASK-017 | Confirming, cancelling, and local execution cannot revive terminal runs. |
+| P0 | Add run epochs/stale worker protection for background execution. | TASK-002, TASK-017 | Retried or late worker results are rejected after cancellation, retry, policy change, or successor run creation. |
 | P0 | Harden OpenAlex connector and add Crossref/arXiv behind the same source interface. | TASK-007 | A local run ingests real normalized scholarly metadata from multiple scholarly providers with retries and attribution. |
 | P0 | Persist immutable source snapshots and passage records. | TASK-010, TASK-011 | Evidence has hash, retrieval timestamp, source ID, passage location, and eligibility. |
 | P1 | Add local FTS retrieval, then Azure AI Search schema. | TASK-012, TASK-013 | Search returns scoped, ranked evidence and fixture precision/recall thresholds pass. |

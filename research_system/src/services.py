@@ -129,9 +129,83 @@ class ProjectService:
             for role in project.members.get(user_id, [])
         ]
 
+    async def verify_user_any_role(
+        self,
+        tenant_id: str,
+        project_id: str,
+        user_id: str,
+        required_roles: List[str],
+    ) -> bool:
+        """Verify user has at least one required role in project."""
+        project = await self.get_project(tenant_id, project_id)
+        if not project:
+            return False
+        assigned_roles = {
+            role.value if hasattr(role, "value") else role
+            for role in project.members.get(user_id, [])
+        }
+        return bool(assigned_roles & set(required_roles))
+
 
 class ResearchRunService:
     """Service for managing research runs."""
+
+    _terminal_states = {
+        RunState.CANCELLED,
+        RunState.RELEASED,
+        RunState.WITHDRAWN,
+        RunState.INSUFFICIENT_EVIDENCE,
+        RunState.BUDGET_EXHAUSTED,
+        RunState.FAILED,
+    }
+    _allowed_transitions = {
+        RunState.AWAITING_SCOPE_CONFIRMATION: {
+            RunState.QUEUED,
+            RunState.CANCELLED,
+        },
+        RunState.QUEUED: {
+            RunState.COLLECTING,
+            RunState.CANCELLED,
+            RunState.FAILED,
+        },
+        RunState.COLLECTING: {
+            RunState.SYNTHESIZING,
+            RunState.INSUFFICIENT_EVIDENCE,
+            RunState.CANCELLED,
+            RunState.FAILED,
+        },
+        RunState.SYNTHESIZING: {
+            RunState.REVIEWING,
+            RunState.CANCELLED,
+            RunState.FAILED,
+        },
+        RunState.REVIEWING: {
+            RunState.AWAITING_APPROVAL,
+            RunState.ADJUDICATION_REQUIRED,
+            RunState.CANCELLED,
+            RunState.FAILED,
+        },
+        RunState.ADJUDICATION_REQUIRED: {
+            RunState.SYNTHESIZING,
+            RunState.REVIEWING,
+            RunState.CANCELLED,
+            RunState.FAILED,
+        },
+        RunState.AWAITING_APPROVAL: {
+            RunState.APPROVED,
+            RunState.CANCELLED,
+            RunState.FAILED,
+        },
+        RunState.APPROVED: {
+            RunState.RELEASE_PENDING,
+            RunState.CANCELLED,
+            RunState.FAILED,
+        },
+        RunState.RELEASE_PENDING: {
+            RunState.RELEASED,
+            RunState.FAILED,
+        },
+    }
     
     def __init__(self, store: Optional[LocalStateStore] = None):
         self.research_config = get_research_config()
@@ -178,11 +252,18 @@ class ResearchRunService:
         project_id: str,
         run_id: str,
         new_state: RunState,
-        revision: int = 1
+        revision: int = 1,
+        expected_state: Optional[RunState] = None,
     ) -> bool:
-        """Update run state with optimistic concurrency."""
+        """Update run state with local transition checks and optimistic concurrency."""
         run = await self.get_run(tenant_id, project_id, run_id)
         if not run or run.report_revision != revision:
+            return False
+        if expected_state is not None and run.state != expected_state:
+            return False
+        if run.state in self._terminal_states:
+            return False
+        if new_state not in self._allowed_transitions.get(run.state, set()):
             return False
         run.state = new_state
         run.updated_time = datetime.utcnow()

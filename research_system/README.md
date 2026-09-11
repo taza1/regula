@@ -2,11 +2,11 @@
 
 ## Overview
 
-This is an early implementation of the multi-agent research plan. The local vertical slice persists projects and runs in SQLite, generates and stores a bounded research plan, requires scope confirmation before queueing, and can discover/search paper metadata through OpenAlex. The planner can run deterministically offline or call an Azure model with Microsoft Entra authentication.
+This is an early implementation of the multi-agent research plan. The local vertical slice persists projects and runs in SQLite, uses local auth headers for tenant/user scope, generates and stores a bounded research plan, requires scope confirmation before queueing, and can discover/search paper metadata through OpenAlex. The planner can run deterministically offline or call an Azure model with Microsoft Entra authentication.
 
 ### Current implementation status
 
-- Working: health/OpenAPI, local project and run persistence, planner agent, scope confirmation, OpenAlex paper discovery, local evidence ingestion/search, provider status, and guarded 404/409/502 errors.
+- Working: health/OpenAPI, local project and run persistence, local auth headers and project membership checks, planner agent, legal run-state checks, scope confirmation, OpenAlex paper discovery, local evidence ingestion/search, provider status, and guarded 401/403/404/409/502 errors.
 - Azure-verified: direct `gpt-5.6-sol` planner inference through `DefaultAzureCredential`; no Azure API key is stored.
 - Still scaffolded: Crossref/arXiv, crawling, Blob Storage, AI Search, Cosmos DB, Service Bus, retrieval/synthesis/review agents, authenticated authorization, and the production release protocol.
 - The release endpoint returns `501 Not Implemented` until verified artifacts, authenticated approval, and conditional commit exist; this prototype never claims a report was published.
@@ -173,6 +173,15 @@ pip install -r requirements.txt
 
 The API is available at `http://127.0.0.1:8000`; Swagger is at `/docs`. This mode uses SQLite and a deterministic planner, so it does not send data or incur model usage.
 
+Local API calls require these headers:
+
+```http
+X-Tenant-Id: TEN-DEMO
+X-User-Id: local-user
+```
+
+The old `tenant_id` query parameter is deprecated; if supplied, it must match `X-Tenant-Id`.
+
 To discover real research papers through OpenAlex while keeping the planner mocked:
 
 ```powershell
@@ -189,6 +198,7 @@ Use Swagger in this sequence:
 6. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
 
 For questions like `What is the latest on AI?`, the OpenAlex connector searches recent works newest-first and caps the inferred recency window at today's date unless you provide an explicit date range on the run.
+Cancelled or terminal runs cannot be confirmed or executed again; create a new run for a retry.
 
 ### Azure model inference from the local API
 

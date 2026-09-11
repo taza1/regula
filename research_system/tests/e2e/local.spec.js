@@ -12,16 +12,21 @@ test("Swagger renders the updated local API", async ({ page }) => {
 
 test("project, run, planner, and confirmation work end to end", async ({ request }) => {
   const tenantId = `TEN-PW-${Date.now()}`;
+  const headers = { "X-Tenant-Id": tenantId, "X-User-Id": "playwright-user" };
   const created = await request.post(
-    `${baseURL}/api/v1/projects?tenant_id=${tenantId}`,
-    { data: { name: "Playwright research", description: "Local smoke test" } },
+    `${baseURL}/api/v1/projects`,
+    {
+      headers,
+      data: { name: "Playwright research", description: "Local smoke test" },
+    },
   );
   expect(created.ok()).toBeTruthy();
   const projectId = (await created.json()).project.project_id;
 
   const runResponse = await request.post(
-    `${baseURL}/api/v1/projects/${projectId}/runs?tenant_id=${tenantId}`,
+    `${baseURL}/api/v1/projects/${projectId}/runs`,
     {
+      headers,
       data: {
         title: "Evidence quality",
         primary_question: "How should evidence quality be assessed?",
@@ -33,7 +38,8 @@ test("project, run, planner, and confirmation work end to end", async ({ request
   const runId = (await runResponse.json()).run.run_id;
 
   const planResponse = await request.post(
-    `${baseURL}/api/v1/projects/${projectId}/runs/${runId}/plan?tenant_id=${tenantId}`,
+    `${baseURL}/api/v1/projects/${projectId}/runs/${runId}/plan`,
+    { headers },
   );
   expect(planResponse.ok()).toBeTruthy();
   const plan = await planResponse.json();
@@ -41,13 +47,14 @@ test("project, run, planner, and confirmation work end to end", async ({ request
   expect(plan.plan.subquestions.length).toBeGreaterThan(0);
 
   const confirmResponse = await request.post(
-    `${baseURL}/api/v1/projects/${projectId}/runs/${runId}/confirm-scope?tenant_id=${tenantId}`,
-    { data: { confirmed: true } },
+    `${baseURL}/api/v1/projects/${projectId}/runs/${runId}/confirm-scope`,
+    { headers, data: { confirmed: true } },
   );
   expect(confirmResponse.ok()).toBeTruthy();
 
   const retrieved = await request.get(
-    `${baseURL}/api/v1/projects/${projectId}/runs/${runId}?tenant_id=${tenantId}`,
+    `${baseURL}/api/v1/projects/${projectId}/runs/${runId}`,
+    { headers },
   );
   expect(retrieved.ok()).toBeTruthy();
   expect((await retrieved.json()).state).toBe("queued");
