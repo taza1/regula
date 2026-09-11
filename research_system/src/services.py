@@ -6,6 +6,7 @@ import hashlib
 import re
 import uuid
 from abc import ABC, abstractmethod
+from urllib.parse import urlparse
 
 from src.models import (
     RunState, ResearchRequest, RunRecord, ProjectModel,
@@ -19,6 +20,9 @@ from src.source_connectors import (
     FallbackSourceConnector,
     LocalSourceConnector,
     OpenAlexConnector,
+    CrossrefConnector,
+    ArxivConnector,
+    CompositeScholarlyConnector,
     SourceConnector,
     SourceRecord,
 )
@@ -61,19 +65,70 @@ def _title_fingerprint(value: str) -> str:
     return "-".join(words[:12])
 
 
+def _domain_matches(hostname: str, policy_domain: str) -> bool:
+    hostname = hostname.casefold().rstrip(".")
+    policy_domain = policy_domain.casefold().strip().removeprefix("*.").rstrip(".")
+    return bool(policy_domain) and (hostname == policy_domain or hostname.endswith("." + policy_domain))
+
+
+def source_passes_governance(
+    source: SourceRecord,
+    *,
+    approved_domains: Optional[List[str]] = None,
+    excluded_domains: Optional[List[str]] = None,
+    allowed_licenses: Optional[List[str]] = None,
+    require_permissive_license: bool = False,
+) -> bool:
+    """Apply domain and text-extraction license policy before persistence."""
+
+    hostname = (urlparse(source.url).hostname or "").casefold()
+    approved = [item for item in (approved_domains or []) if item.strip()]
+    excluded = [item for item in (excluded_domains or []) if item.strip()]
+    if excluded and any(_domain_matches(hostname, item) for item in excluded):
+        return False
+    if approved and not any(_domain_matches(hostname, item) for item in approved):
+        return False
+    license_value = (source.license or "").casefold()
+    allowed = [item.casefold().strip() for item in (allowed_licenses or []) if item.strip()]
+    if require_permissive_license and not license_value:
+        return False
+    normalized_license = license_value.replace("_", "-")
+    license_matches = any(item in normalized_license for item in allowed)
+    if "cc-by" in allowed and "creativecommons.org/licenses/by" in normalized_license:
+        license_matches = True
+    if "cc0" in allowed and "creativecommons.org/publicdomain/zero" in normalized_license:
+        license_matches = True
+    if license_value and allowed and not license_matches:
+        return False
+    return True
+
+
 def canonical_source_id(source: SourceRecord) -> str:
     """Return a provider-independent local canonical ID for deduplication."""
 
     doi = _normalize_doi(source.doi)
+    if not doi:
+        for value in (source.metadata or {}).get("doi"), (source.metadata or {}).get("crossref_doi"):
+            doi = _normalize_doi(value)
+            if doi:
+                break
     if doi:
+        if "10.48550/arxiv." in doi:
+            arxiv_id = re.sub(r"v\d+$", "", doi.split("10.48550/arxiv.", 1)[1].casefold())
+            return "CAN-ARXIV-" + _sha256_hex(arxiv_id)[:16].upper()
         return "CAN-DOI-" + _sha256_hex(doi)[:16].upper()
     metadata = source.metadata or {}
-    for key in ("openalex_id", "arxiv_id", "crossref_doi"):
+    for key in ("openalex_id", "arxiv_id"):
         value = metadata.get(key)
         if isinstance(value, str) and value.strip():
+            if key == "arxiv_id":
+                value = re.sub(r"v\d+$", "", value.strip().casefold())
             return f"CAN-{key.upper().replace('_', '-')}-" + _sha256_hex(
                 value.strip().casefold()
             )[:16].upper()
+    arxiv_match = re.search(r"(?:arxiv[.:/])?(\d{4}\.\d{4,5})(?:v\d+)?", f"{source.url} {source.source_id}".casefold())
+    if arxiv_match:
+        return "CAN-ARXIV-" + _sha256_hex(arxiv_match.group(1))[:16].upper()
     year = str(source.published_at.year) if source.published_at else "unknown"
     fingerprint = _title_fingerprint(source.title)
     return "CAN-TITLE-" + _sha256_hex(f"{fingerprint}|{year}")[:16].upper()
@@ -645,6 +700,7 @@ class EvidenceService:
         if not run:
             return []
         configured_limit = run.research_request.max_sources
+        research_config = get_research_config()
         requested_limit = configured_limit if max_sources is None else max_sources
         if int(requested_limit) <= 0:
             return []
@@ -653,6 +709,9 @@ class EvidenceService:
         )
         sources: List[SourceRecord] = []
         seen_ids: set[str] = set()
+        seen_dois: set[str] = set()
+        seen_arxiv_ids: set[str] = set()
+        seen_openalex_ids: set[str] = set()
         seen_canonical_ids: set[str] = set()
         for existing in await self.list_sources(tenant_id, project_id, run_id, limit=1000):
             seen_canonical_ids.add(
@@ -673,11 +732,31 @@ class EvidenceService:
                 date_range_end=run.research_request.date_range_end,
             )
             for source in discovered:
+                if not source_passes_governance(
+                    source,
+                    approved_domains=run.research_request.approved_source_domains,
+                    excluded_domains=run.research_request.excluded_domains,
+                    allowed_licenses=research_config.allowed_source_licenses,
+                    require_permissive_license=research_config.require_permissive_license,
+                ):
+                    continue
                 canonical_id = canonical_source_id(source)
-                if source.source_id in seen_ids or canonical_id in seen_canonical_ids:
+                doi = _normalize_doi(source.doi or source.metadata.get("doi") or source.metadata.get("crossref_doi"))
+                arxiv = source.metadata.get("arxiv_id", "")
+                arxiv = re.sub(r"v\d+$", "", str(arxiv).casefold()) if arxiv else ""
+                openalex = str(source.metadata.get("openalex_id", "")).rstrip("/").casefold()
+                if (source.source_id in seen_ids or canonical_id in seen_canonical_ids or
+                        (doi and doi in seen_dois) or (arxiv and arxiv in seen_arxiv_ids) or
+                        (openalex and openalex in seen_openalex_ids)):
                     continue
                 seen_ids.add(source.source_id)
                 seen_canonical_ids.add(canonical_id)
+                if doi:
+                    seen_dois.add(doi)
+                if arxiv:
+                    seen_arxiv_ids.add(arxiv)
+                if openalex:
+                    seen_openalex_ids.add(openalex)
                 metadata = dict(source.metadata)
                 metadata["canonical_source_id"] = canonical_id
                 scoped_source = source.model_copy(
@@ -1065,6 +1144,7 @@ def create_source_connector() -> SourceConnector:
             base_url=config.openalex_base_url,
             mailto=config.openalex_mailto,
             timeout_seconds=config.openalex_timeout_seconds,
+            request_interval_seconds=config.openalex_request_interval_seconds,
             latest_query_days=config.latest_query_days,
         )
     if provider == "openalex_with_local_fallback":
@@ -1073,9 +1153,30 @@ def create_source_connector() -> SourceConnector:
                 base_url=config.openalex_base_url,
                 mailto=config.openalex_mailto,
                 timeout_seconds=config.openalex_timeout_seconds,
+                request_interval_seconds=config.openalex_request_interval_seconds,
                 latest_query_days=config.latest_query_days,
             )
         )
+    if provider == "crossref":
+        return CrossrefConnector(base_url=config.crossref_base_url, mailto=config.crossref_mailto,
+                                 timeout_seconds=config.crossref_timeout_seconds,
+                                 latest_query_days=config.latest_query_days,
+                                 request_interval_seconds=config.crossref_request_interval_seconds)
+    if provider == "arxiv":
+        return ArxivConnector(base_url=config.arxiv_base_url, timeout_seconds=config.arxiv_timeout_seconds)
+    if provider == "scholarly_with_local_fallback":
+        return FallbackSourceConnector(CompositeScholarlyConnector((
+            OpenAlexConnector(base_url=config.openalex_base_url, mailto=config.openalex_mailto,
+                              timeout_seconds=config.openalex_timeout_seconds,
+                              latest_query_days=config.latest_query_days,
+                              request_interval_seconds=config.openalex_request_interval_seconds),
+            CrossrefConnector(base_url=config.crossref_base_url, mailto=config.crossref_mailto,
+                              timeout_seconds=config.crossref_timeout_seconds,
+                              latest_query_days=config.latest_query_days,
+                              request_interval_seconds=config.crossref_request_interval_seconds),
+            ArxivConnector(base_url=config.arxiv_base_url, timeout_seconds=config.arxiv_timeout_seconds,
+                           request_interval_seconds=config.arxiv_request_interval_seconds),
+        )))
     raise ValueError(
-        "SOURCE_CONNECTOR must be one of: local, openalex, openalex_with_local_fallback"
+        "SOURCE_CONNECTOR must be one of: local, openalex, crossref, arxiv, scholarly_with_local_fallback, openalex_with_local_fallback"
     )

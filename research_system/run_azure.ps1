@@ -2,7 +2,7 @@ param(
     [string]$Endpoint = 'https://foundry-agent-90af7e99.openai.azure.com',
     [string]$Deployment = 'gpt-5.6-sol',
     [int]$Port = 8000,
-    [ValidateSet('local', 'openalex', 'openalex_with_local_fallback')]
+    [ValidateSet('local', 'openalex', 'crossref', 'arxiv', 'scholarly_with_local_fallback', 'openalex_with_local_fallback')]
     [string]$SourceConnector = 'local',
     [string]$OpenAlexMailto = ''
 )

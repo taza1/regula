@@ -4,8 +4,14 @@ import pytest
 
 from src.local_store import LocalStateStore
 from src.models import PeerReviewStatus, ResearchRequest, SourceType
-from src.services import EvidenceService, ResearchRunService
-from src.source_connectors import LocalSourceConnector, OpenAlexConnector, SourceRecord
+from src.services import EvidenceService, ResearchRunService, source_passes_governance
+from src.source_connectors import (
+    ArxivConnector,
+    CrossrefConnector,
+    LocalSourceConnector,
+    OpenAlexConnector,
+    SourceRecord,
+)
 
 
 @pytest.mark.asyncio
@@ -218,6 +224,99 @@ def test_openalex_connector_maps_work_to_source(monkeypatch):
     assert sources[0].authors == ["Ada Lovelace", "Grace Hopper"]
     assert sources[0].passage == "AI agents coordinate tools"
     assert sources[0].metadata["source_display_name"] == "Journal of AI"
+
+
+def test_crossref_connector_maps_work_and_filters(monkeypatch):
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"items": [{
+                "DOI": "10.1234/example", "URL": "https://doi.org/10.1234/example",
+                "title": ["A Crossref paper"], "abstract": "<jats:p>Useful &amp; clear.</jats:p>",
+                "author": [{"given": "Ada", "family": "Lovelace"}],
+                "published": {"date-parts": [[2026, 8, 15]]},
+                "type": "journal-article", "container-title": ["Journal"],
+                "publisher": "Publisher", "is-referenced-by-count": 4,
+                "license": [{"URL": "https://creativecommons.org/licenses/by/4.0/"}],
+            }]}}
+
+    def fake_get(url, params, timeout, headers):
+        captured.update(url=url, params=params, headers=headers)
+        return Response()
+
+    monkeypatch.setattr("src.source_connectors.requests.get", fake_get)
+    result = CrossrefConnector(mailto="researcher@example.test").search_sync(
+        "methods", limit=3, date_range_start=__import__("datetime").datetime(2026, 1, 1),
+        date_range_end=__import__("datetime").datetime(2026, 12, 31),
+    )
+    assert captured["url"].endswith("/works")
+    assert captured["params"] == {
+        "query": "methods", "rows": 3, "mailto": "researcher@example.test",
+        "filter": "from-pub-date:2026-01-01,until-pub-date:2026-12-31",
+    }
+    assert result[0].abstract == "Useful & clear."
+    assert result[0].authors == ["Ada Lovelace"]
+    assert result[0].peer_review_status == PeerReviewStatus.PEER_REVIEWED
+
+
+def test_arxiv_connector_maps_and_filters_atom(monkeypatch):
+    class Response:
+        text = """<feed xmlns="http://www.w3.org/2005/Atom"
+          xmlns:arxiv="http://arxiv.org/schemas/atom">
+          <entry><id>http://arxiv.org/abs/2401.12345v2</id>
+          <title>  An arXiv title </title><summary> An abstract. </summary>
+          <published>2026-08-15T00:00:00Z</published>
+          <author><name>Ada Lovelace</name></author>
+          <category term="cs.AI"/><arxiv:primary_category term="cs.AI"/>
+          <arxiv:doi>10.48550/arXiv.2401.12345</arxiv:doi>
+          <link rel="alternate" href="http://arxiv.org/abs/2401.12345"/>
+          <link title="pdf" href="http://arxiv.org/pdf/2401.12345.pdf"/>
+          </entry></feed>"""
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("src.source_connectors.requests.get", lambda *args, **kwargs: Response())
+    result = ArxivConnector().search_sync(
+        "AI", date_range_start=__import__("datetime").datetime(2026, 1, 1),
+        date_range_end=__import__("datetime").datetime(2026, 12, 31),
+    )
+    assert result[0].metadata["arxiv_id"] == "2401.12345"
+    assert result[0].doi == "10.48550/arXiv.2401.12345"
+    assert result[0].authors == ["Ada Lovelace"]
+    assert result[0].metadata["pdf_url"].endswith(".pdf")
+
+
+def test_source_governance_enforces_domains_and_licenses():
+    source = SourceRecord(
+        source_id="GOV-1",
+        connector="test",
+        title="Permitted source",
+        url="https://papers.example.org/article",
+        license="https://creativecommons.org/licenses/by/4.0/",
+    )
+    assert source_passes_governance(
+        source,
+        approved_domains=["example.org"],
+        allowed_licenses=["cc-by"],
+        require_permissive_license=True,
+    )
+    assert not source_passes_governance(
+        source, excluded_domains=["papers.example.org"], allowed_licenses=["cc-by"]
+    )
+    assert not source_passes_governance(
+        source, approved_domains=["other.example"], allowed_licenses=["cc-by"]
+    )
+    assert not source_passes_governance(
+        source,
+        approved_domains=["example.org"],
+        allowed_licenses=["cc0"],
+        require_permissive_license=True,
+    )
 
 
 @pytest.mark.asyncio

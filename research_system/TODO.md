@@ -18,11 +18,11 @@
 ## Next milestone: real source discovery
 
 - [x] Add OpenAlex connector
-- [ ] Add Crossref connector
-- [ ] Add arXiv connector
-- [ ] Normalize source metadata and identifiers
-- [ ] Enforce approved and excluded domain policies
-- [ ] Add retries, rate limits, and source attribution
+- [x] Add Crossref connector
+- [x] Add arXiv connector
+- [x] Normalize source metadata and identifiers
+- [x] Enforce approved and excluded domain policies
+- [x] Add retries, rate limits, and source attribution
 
 ## Evidence pipeline
 
