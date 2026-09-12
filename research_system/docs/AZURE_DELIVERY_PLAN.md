@@ -38,7 +38,7 @@ At the 2026-09-11 verification point, `rg-foundry-agent-dev` showed only the Fou
 The local app is useful for development, but it is not yet an end-to-end research platform:
 
 - The API uses header-based local development identity and project membership checks; production Entra token validation is not implemented.
-- Only the planner is wired as an agent; source search, research synthesis, fact check, citation validation, critical review, safety, and evaluator agents are not implemented.
+- Planning, scholarly discovery, deterministic draft synthesis, and structural citation validation exist as local services. Independent semantic fact-checking, critical review, safety review, evaluators, and hosted agent orchestration are not implemented.
 - `execute-local` can use deterministic local fixtures or scholarly metadata discovery. Full-document ingestion is an explicit service path and is not yet wired into the default API execution flow.
 - Evidence storage is SQLite JSON records, not immutable Blob originals plus Cosmos metadata and Azure AI Search indexes.
 - Search has scoped local FTS5/BM25 retrieval; embeddings, semantic retrieval, Azure AI Search, and measured precision/recall are not implemented.
@@ -90,7 +90,7 @@ Required work:
 - Add passage records with section/offset/page fields where available.
 - Establish retrieval evaluation fixtures, then add embeddings and move retrieval to Azure AI Search.
 - Implement a synthesis pass that creates a draft plus a material claim ledger.
-- Add deterministic citation validation over claim-to-passage references.
+- Extend deterministic citation integrity validation with semantic fact-checking and release-blocking review gates.
 - Preserve `/release` as `501` until approval, manifest, artifact verification, and conditional commit are implemented.
 
 Exit criteria:

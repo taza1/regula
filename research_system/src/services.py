@@ -14,6 +14,7 @@ from src.models import (
     ApprovalRecord, ReleaseRecord, TenantModel, EvidenceRecord, ClaimRecord,
     ProjectMembership, SourceSnapshotRecord, PassageRecord, DraftReport,
     EvidenceLink, EvidenceRelation,
+    ReviewFinding, ReviewFindingSeverity, ReviewFindingStatus,
 )
 from src.config import get_research_config, get_azure_config
 from src.local_store import LocalStateStore
@@ -45,6 +46,11 @@ class SynthesisResult(TypedDict):
 
     draft: DraftReport
     claims: List[ClaimRecord]
+
+
+class CitationValidationResult(TypedDict):
+    validated_claim_ids: List[str]
+    findings: List[ReviewFinding]
 
 
 def _default_store() -> LocalStateStore:
@@ -439,6 +445,22 @@ class ResearchRunService:
             for payload in payloads
             if (claim := ClaimRecord.model_validate(payload)).run_id == run_id
         ]
+
+    async def record_finding(
+        self, tenant_id: str, project_id: str, run_id: str, finding: ReviewFinding
+    ) -> bool:
+        """Persist a scoped review finding and attach it to the run."""
+        run = await self.get_run(tenant_id, project_id, run_id)
+        if (not run or finding.tenant_id != tenant_id or finding.project_id != project_id
+                or finding.run_id != run_id or finding.report_revision != run.report_revision):
+            return False
+        self.store.put("finding", tenant_id, project_id, finding.finding_id,
+                       finding.model_dump(mode="json"))
+        if finding.finding_id not in run.findings:
+            run.findings.append(finding.finding_id)
+            run.updated_time = datetime.utcnow()
+            self.store.put("run", tenant_id, project_id, run_id, run.model_dump(mode="json"))
+        return True
     
     async def record_evidence(
         self,
@@ -1040,6 +1062,7 @@ class EvidenceService:
             for term in re.findall(r"[a-z0-9]{2,}", query.casefold())
             if term.strip()
         ]
+
         bounded_limit = max(1, min(limit, 100))
         fts_candidates = self.store.search_evidence(
             tenant_id, project_id, run_id, terms, bounded_limit
@@ -1203,6 +1226,73 @@ class SynthesisService:
             "draft", tenant_id, project_id, run_id, draft.model_dump(mode="json")
         )
         return {"draft": draft, "claims": claims}
+
+
+class CitationValidationService:
+    """Validate local claim-to-evidence integrity without claiming semantic fact-checking."""
+
+    def __init__(self, store: Optional[LocalStateStore] = None):
+        self.store = store or _default_store()
+
+    async def validate_local(
+        self, tenant_id: str, project_id: str, run_id: str
+    ) -> Optional[CitationValidationResult]:
+        run_service = ResearchRunService(self.store)
+        run = await run_service.get_run(tenant_id, project_id, run_id)
+        if not run:
+            return None
+        claims = await run_service.list_claims(tenant_id, project_id, run_id)
+        validated: List[str] = []
+        findings: List[ReviewFinding] = []
+
+        for claim in claims:
+            problems: List[str] = []
+            if claim.report_revision != run.report_revision:
+                problems.append("Claim revision does not match the current report revision.")
+            if not claim.evidence_links:
+                problems.append("Material claim has no evidence citation.")
+            for link in claim.evidence_links:
+                payload = self.store.get("evidence", tenant_id, project_id, link.evidence_id)
+                if not payload:
+                    problems.append(f"Citation {link.evidence_id} does not resolve in this project.")
+                    continue
+                evidence = EvidenceRecord.model_validate(payload)
+                if evidence.run_id != run_id or evidence.report_revision != run.report_revision:
+                    problems.append(f"Citation {link.evidence_id} belongs to another run or revision.")
+                elif (evidence.source_use_decision.value != "allowed"
+                      or evidence.eligibility_status.value != "eligible"):
+                    problems.append(f"Citation {link.evidence_id} is not eligible for use.")
+                elif link.relation == EvidenceRelation.SUPPORTS:
+                    claim_text = " ".join(claim.text.casefold().split())
+                    passage_text = " ".join(evidence.passage.casefold().split())
+                    if claim_text not in passage_text:
+                        problems.append(
+                            f"Citation {link.evidence_id} does not contain the local draft claim text."
+                        )
+
+            if problems:
+                claim.status = "insufficient_evidence"
+                finding = ReviewFinding(
+                    tenant_id=tenant_id, project_id=project_id, run_id=run_id,
+                    report_revision=run.report_revision,
+                    finding_id="FND-" + _sha256_hex(
+                        f"{tenant_id}|{project_id}|{run_id}|{claim.claim_id}|citation-integrity"
+                    )[:16].upper(),
+                    claim_id=claim.claim_id,
+                    severity=ReviewFindingSeverity.HIGH if claim.material else ReviewFindingSeverity.WARNING,
+                    category="citation-integrity", control_class="evidence",
+                    status=ReviewFindingStatus.OPEN, verdict="insufficient_evidence",
+                    explanation=" ".join(problems),
+                    required_action="Correct the claim or link eligible evidence from the current revision.",
+                    reviewer_id="local-citation-validator",
+                )
+                await run_service.record_finding(tenant_id, project_id, run_id, finding)
+                findings.append(finding)
+            else:
+                claim.status = "citation_validated"
+                validated.append(claim.claim_id)
+            await run_service.record_claim(tenant_id, project_id, run_id, claim)
+        return {"validated_claim_ids": validated, "findings": findings}
 
 
 def create_source_connector() -> SourceConnector:

@@ -97,6 +97,31 @@ def test_project_run_and_mock_plan_survive_service_restart(tmp_path, monkeypatch
         assert synthesized.json()["draft"]["references"]
         assert synthesized.json()["claims"]
 
+        validated = client.post(
+            f"/api/v1/projects/{project_id}/runs/{run_id}/validate-citations-local",
+            headers=headers,
+        )
+        assert validated.status_code == 200
+        assert validated.json()["passed"] is True
+        assert validated.json()["validated_claim_ids"]
+        assert validated.json()["findings"] == []
+
+        claim_id = synthesized.json()["claims"][0]["claim_id"]
+        claim = main_module.citation_validation_service.store.get(
+            "claim", tenant_id, project_id, claim_id
+        )
+        claim["text"] = "A statement absent from the cited evidence."
+        main_module.citation_validation_service.store.put(
+            "claim", tenant_id, project_id, claim_id, claim
+        )
+        invalid = client.post(
+            f"/api/v1/projects/{project_id}/runs/{run_id}/validate-citations-local",
+            headers=headers,
+        )
+        assert invalid.status_code == 200
+        assert invalid.json()["passed"] is False
+        assert invalid.json()["findings"][0]["verdict"] == "insufficient_evidence"
+
         searched = client.post(
             f"/api/v1/projects/{project_id}/runs/{run_id}/search",
             headers=headers,

@@ -19,7 +19,8 @@ flowchart TD
     K --> L[Ingest abstracts/passages as evidence]
     L --> L2[Optional approved PDF/HTML extraction and chunking]
     L2 --> M[Create cited draft skeleton and claim ledger]
-    M --> N[Search evidence]
+    M --> M2[Validate local citation integrity and persist findings]
+    M2 --> N[Search evidence with FTS5 and BM25]
     N --> O[Rank matching paper passages]
     O --> P[Retrieve evidence by ID]
 ```
@@ -36,15 +37,16 @@ The deprecated `tenant_id` query parameter is only accepted when it matches
 4. `POST /api/v1/projects/{project_id}/runs/{run_id}/confirm-scope`
 5. `POST /api/v1/projects/{project_id}/runs/{run_id}/execute-local`
 6. `POST /api/v1/projects/{project_id}/runs/{run_id}/synthesize-local`
-7. `POST /api/v1/projects/{project_id}/runs/{run_id}/evidence`
-8. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
-9. `GET /api/v1/projects/{project_id}/evidence/{evidence_id}`
+7. `POST /api/v1/projects/{project_id}/runs/{run_id}/validate-citations-local`
+8. `POST /api/v1/projects/{project_id}/runs/{run_id}/evidence`
+9. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
+10. `GET /api/v1/projects/{project_id}/evidence/{evidence_id}`
 
 ## Current boundaries
 
 The local vertical slice is functional through source discovery, canonical source
 deduplication, source snapshots, passage records, evidence ingestion, claim-ledger
-draft skeletons, indexing, keyword search, local project membership checks, and
+draft skeletons, citation-integrity findings, FTS5/BM25 search, local project membership checks, and
 legal run-state transitions. By default `execute-local` uses
 deterministic local fixtures and makes no external network calls. Set
 `SOURCE_CONNECTOR=openalex` or launch with
@@ -54,6 +56,6 @@ evidence. Results are deduplicated across providers before ingestion.
 Cancelled and terminal runs cannot be revived by a later confirmation or worker
 call.
 
-Governed crawling, background workers, report synthesis, and production Azure
+Robots-aware crawling, semantic fact-checking, critical/safety review, background workers, reviewed report synthesis, and production Azure
 storage/search integrations are not yet connected. The local
 draft skeleton is not a reviewed or release-ready report.

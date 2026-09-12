@@ -93,7 +93,7 @@ These are the first implementation tickets I would open:
 | In progress | Add local FTS retrieval, then Azure AI Search schema. | TASK-012, TASK-013 | Local FTS5/BM25 and scope/eligibility filtering are implemented; embeddings, Azure indexes, and precision/recall evaluation remain. |
 | Done | Implement deterministic local draft skeleton plus claim ledger. | TASK-016, TASK-030 | Drafts cite eligible evidence and claims remain pending review. |
 | P1 | Implement reviewed LLM synthesis with insufficiency/contradiction handling. | TASK-016, TASK-030 | Unsupported claims are tracked as insufficient evidence and cannot enter a release-ready draft. |
-| P1 | Implement citation validator and fact-checker. | TASK-018, TASK-019 | Bad citation and unsupported-claim fixtures block release readiness. |
+| In progress | Implement citation validator and fact-checker. | TASK-018, TASK-019 | Local citation integrity checks persist findings; independent semantic fact-checking and release-blocking gates remain. |
 | P1 | Add Bicep/azd foundation for dev. | TASK-004, TASK-005, TASK-006 | Empty resource group deploys all required services with managed identities. |
 | P2 | Implement Service Bus workers and stale-result rejection. | TASK-017, TASK-004 | Duplicate/retried messages are idempotent and cancelled runs reject late output. |
 | P2 | Implement approval, manifest, and release protocol. | TASK-023, TASK-025, TASK-027, TASK-034 | Fault injection proves release invariants. |

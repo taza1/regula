@@ -70,6 +70,15 @@ test("project, run, evidence, and draft work end to end", async ({ request }) =>
   expect(synthesisBody.claims.length).toBeGreaterThan(0);
   expect(synthesisBody.draft.references.length).toBeGreaterThan(0);
 
+  const validation = await request.post(
+    `${baseURL}/api/v1/projects/${projectId}/runs/${runId}/validate-citations-local`,
+    { headers },
+  );
+  expect(validation.ok()).toBeTruthy();
+  const validationBody = await validation.json();
+  expect(validationBody.passed).toBeTruthy();
+  expect(validationBody.validated_claim_ids.length).toBeGreaterThan(0);
+
   const retrieved = await request.get(
     `${baseURL}/api/v1/projects/${projectId}/runs/${runId}`,
     { headers },

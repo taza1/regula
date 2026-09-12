@@ -148,6 +148,7 @@ This is an early implementation of the multi-agent research plan. The local vert
 - `POST /api/v1/projects/{project_id}/runs/{run_id}/confirm-scope` - Confirm research scope
 - `POST /api/v1/projects/{project_id}/runs/{run_id}/execute-local` - Discover and ingest local/OpenAlex evidence
 - `POST /api/v1/projects/{project_id}/runs/{run_id}/synthesize-local` - Create a local cited draft skeleton and claim ledger
+- `POST /api/v1/projects/{project_id}/runs/{run_id}/validate-citations-local` - Check local claim/citation integrity and persist findings
 - `POST /api/v1/projects/{project_id}/runs/{run_id}/cancel` - Cancel run
 
 ### Approvals & Release
@@ -198,12 +199,13 @@ Use Swagger in this sequence:
 4. `POST /api/v1/projects/{project_id}/runs/{run_id}/confirm-scope`
 5. `POST /api/v1/projects/{project_id}/runs/{run_id}/execute-local`
 6. `POST /api/v1/projects/{project_id}/runs/{run_id}/synthesize-local`
-7. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
+7. `POST /api/v1/projects/{project_id}/runs/{run_id}/validate-citations-local`
+8. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
 
 Connector choices are `local` (the deterministic default), `openalex`, `crossref`, `arxiv`, `scholarly_with_local_fallback`, and the backward-compatible `openalex_with_local_fallback`. For questions like `What is the latest on AI?`, OpenAlex and Crossref search recent works newest-first unless you provide an explicit date range on the run. Scholarly aggregation deduplicates shared DOI, arXiv, OpenAlex, and canonical identifiers. Before persistence, source URLs are checked against each run's approved/excluded domains and explicit licenses are checked against the configured extraction policy. External requests use bounded retries with exponential backoff and jitter; arXiv defaults to one request every three seconds.
 
 The default execution path ingests provider abstracts without document network I/O. Call `EvidenceService.ingest_full_sources(...)` explicitly when a run has approved domains and licenses: it safely fetches an identified PDF or HTML URL, enforces content-size/type limits, extracts normalized text, chunks it into bounded passages, removes duplicate chunks by SHA-256, and stores the resulting source snapshots and passages in SQLite.
-`synthesize-local` creates a draft skeleton and claim ledger for review; it is not fact-checked, approved, or release-ready.
+`synthesize-local` creates a draft skeleton and claim ledger for review. `validate-citations-local` checks that each claim resolves to eligible evidence from the same run/revision and that deterministic draft text occurs in the cited passage. It does not perform semantic fact-checking, critical review, approval, or release.
 Cancelled or terminal runs cannot be confirmed or executed again; create a new run for a retry.
 
 ### Azure model inference from the local API

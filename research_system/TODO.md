@@ -45,7 +45,8 @@
 
 ## Review, security, and operations
 
-- [ ] Implement fact-checking and citation validation
+- [x] Implement deterministic local citation-integrity validation and persisted findings
+- [ ] Implement independent semantic fact-checking and release-blocking citation gates
 - [ ] Add critical review and prompt-injection checks
 - [ ] Add authenticated identity and role enforcement
 - [ ] Complete approval and release workflows

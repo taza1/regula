@@ -15,7 +15,8 @@ from src.models import (
 )
 from src.services import (
     TenantService, ProjectService, ResearchRunService,
-    ApprovalService, ReleaseService, EvidenceService, SynthesisService
+    ApprovalService, ReleaseService, EvidenceService, SynthesisService,
+    CitationValidationService,
 )
 from src.agents import AgentMessage, AgentOrchestrator, AgentRole
 from src.local_store import LocalStateStore
@@ -34,6 +35,7 @@ approval_service: Optional[ApprovalService] = None
 release_service: Optional[ReleaseService] = None
 evidence_service: Optional[EvidenceService] = None
 synthesis_service: Optional[SynthesisService] = None
+citation_validation_service: Optional[CitationValidationService] = None
 orchestrator: Optional[AgentOrchestrator] = None
 model_client: Optional[ResearchModelClient] = None
 
@@ -42,7 +44,7 @@ model_client: Optional[ResearchModelClient] = None
 async def lifespan(app: FastAPI):
     """Application lifecycle management."""
     global tenant_service, project_service, run_service
-    global approval_service, release_service, evidence_service, synthesis_service, orchestrator
+    global approval_service, release_service, evidence_service, synthesis_service, citation_validation_service, orchestrator
     global model_client
     
     # Startup
@@ -54,6 +56,7 @@ async def lifespan(app: FastAPI):
     release_service = ReleaseService(store)
     evidence_service = EvidenceService(store)
     synthesis_service = SynthesisService(store)
+    citation_validation_service = CitationValidationService(store)
     model_client = create_model_client(get_model_config())
     orchestrator = AgentOrchestrator(model_client)
     
@@ -666,6 +669,46 @@ async def cancel_research_run(
         return {
             "message": "Research run cancelled. In-flight calls may still finish.",
             "run_id": run_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/validate-citations-local")
+async def validate_local_citations(
+    project_id: str,
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Validate citation integrity for the local deterministic draft."""
+    try:
+        scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+        await _require_project_role(
+            scoped_tenant_id, project_id, auth.user_id,
+            [ProjectMembership.REVIEWER, ProjectMembership.ADMIN],
+        )
+        run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if run.state != RunState.REVIEWING:
+            raise HTTPException(status_code=409, detail="Citation validation requires a reviewing run")
+        result = await citation_validation_service.validate_local(
+            scoped_tenant_id, project_id, run_id
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return {
+            "run_id": run_id,
+            "passed": bool(result["validated_claim_ids"]) and not result["findings"],
+            "validated_claim_ids": result["validated_claim_ids"],
+            "findings": [finding.model_dump(mode="json") for finding in result["findings"]],
+            "message": (
+                "Local citation integrity validation completed. Independent semantic, critical, "
+                "and safety reviews are still required before approval."
+            ),
         }
     except HTTPException:
         raise
