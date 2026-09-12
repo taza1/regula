@@ -98,6 +98,21 @@ These are the first implementation tickets I would open:
 | P2 | Implement Service Bus workers and stale-result rejection. | TASK-017, TASK-004 | Duplicate/retried messages are idempotent and cancelled runs reject late output. |
 | P2 | Implement approval, manifest, and release protocol. | TASK-023, TASK-025, TASK-027, TASK-034 | Fault injection proves release invariants. |
 
+## Audit Follow-up Subtasks (2026-09-12)
+
+All six entries are open. Detailed scope and acceptance criteria are in the [hardening backlog](HARDENING_BACKLOG.md).
+
+| Subtask | Priority | Work | Parent tasks |
+| --- | --- | --- | --- |
+| HARD-001 | P0 | Harden document fetching: redirects, resolved addresses, and streaming limits. | TASK-008, TASK-031 |
+| HARD-002 | P1 | Surface provider failures and partial results. | TASK-007, TASK-015 |
+| HARD-003 | P1 | Fix arXiv recency queries and pagination. | TASK-007 |
+| HARD-004 | P1 | Enforce snapshot immutability; existing persistence does not guarantee it. | TASK-010 |
+| HARD-005 | P1 | Add research-system Python/Playwright CI alongside OPA checks. | TASK-024 |
+| HARD-006 | P2 | Reconcile Azure plan and completion labels with verified branch state. | TASK-001 |
+
+The earlier snapshot completion entry covers local snapshot/passages storage only; the immutability guarantee remains open under HARD-004.
+
 ## Acceptance Test Matrix
 
 | Area | Must pass before pilot |
