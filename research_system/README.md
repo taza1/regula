@@ -2,13 +2,13 @@
 
 ## Overview
 
-This is an early implementation of the multi-agent research plan. The local vertical slice persists projects and runs in SQLite, uses local auth headers for tenant/user scope, generates and stores a bounded research plan, requires scope confirmation before queueing, and can discover/search paper metadata through OpenAlex. The planner can run deterministically offline or call an Azure model with Microsoft Entra authentication.
+This is an early implementation of the multi-agent research plan. The local vertical slice persists projects and runs in SQLite, uses local auth headers for tenant/user scope, generates and stores a bounded research plan, requires scope confirmation before queueing, and can discover/search paper metadata through OpenAlex, Crossref, and arXiv. The planner can run deterministically offline or call an Azure model with Microsoft Entra authentication.
 
 ### Current implementation status
 
-- Working: health/OpenAPI, local project and run persistence, local auth headers and project membership checks, planner agent, legal run-state checks, scope confirmation, OpenAlex paper discovery, source snapshots, passage records, local evidence ingestion/search, deterministic draft skeleton, claim ledger, provider status, and guarded 401/403/404/409/502 errors.
+- Working: health/OpenAPI, local project and run persistence, local auth headers and project membership checks, planner agent, legal run-state checks, scope confirmation, OpenAlex/Crossref/arXiv paper discovery with cross-provider deduplication, source snapshots, passage records, local evidence ingestion/search, deterministic draft skeleton, claim ledger, provider status, and guarded 401/403/404/409/502 errors.
 - Azure-verified: direct `gpt-5.6-sol` planner inference through `DefaultAzureCredential`; no Azure API key is stored.
-- Still scaffolded: Crossref/arXiv, crawling, Blob Storage, AI Search, Cosmos DB, Service Bus, LLM synthesis/review agents, production Entra authorization, and the production release protocol.
+- Still scaffolded: crawling, Blob Storage, AI Search, Cosmos DB, Service Bus, LLM synthesis/review agents, production Entra authorization, and the production release protocol.
 - The release endpoint returns `501 Not Implemented` until verified artifacts, authenticated approval, and conditional commit exist; this prototype never claims a report was published.
 
 ## Architecture
@@ -184,10 +184,10 @@ X-User-Id: local-user
 
 The old `tenant_id` query parameter is deprecated; if supplied, it must match `X-Tenant-Id`.
 
-To discover real research papers through OpenAlex while keeping the planner mocked:
+To discover real research papers through the scholarly providers while keeping the planner mocked:
 
 ```powershell
-.\run_local.ps1 -SourceConnector openalex_with_local_fallback
+.\run_local.ps1 -SourceConnector scholarly_with_local_fallback
 ```
 
 Use Swagger in this sequence:
@@ -200,7 +200,9 @@ Use Swagger in this sequence:
 6. `POST /api/v1/projects/{project_id}/runs/{run_id}/synthesize-local`
 7. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
 
-For questions like `What is the latest on AI?`, the OpenAlex connector searches recent works newest-first and caps the inferred recency window at today's date unless you provide an explicit date range on the run.
+Connector choices are `local` (the deterministic default), `openalex`, `crossref`, `arxiv`, `scholarly_with_local_fallback`, and the backward-compatible `openalex_with_local_fallback`. For questions like `What is the latest on AI?`, OpenAlex and Crossref search recent works newest-first unless you provide an explicit date range on the run. Scholarly aggregation deduplicates shared DOI, arXiv, OpenAlex, and canonical identifiers. Before persistence, source URLs are checked against each run's approved/excluded domains and explicit licenses are checked against the configured extraction policy. External requests use bounded retries with exponential backoff and jitter; arXiv defaults to one request every three seconds.
+
+The default execution path ingests provider abstracts without document network I/O. Call `EvidenceService.ingest_full_sources(...)` explicitly when a run has approved domains and licenses: it safely fetches an identified PDF or HTML URL, enforces content-size/type limits, extracts normalized text, chunks it into bounded passages, removes duplicate chunks by SHA-256, and stores the resulting source snapshots and passages in SQLite.
 `synthesize-local` creates a draft skeleton and claim ledger for review; it is not fact-checked, approved, or release-ready.
 Cancelled or terminal runs cannot be confirmed or executed again; create a new run for a retry.
 
@@ -311,7 +313,7 @@ npm run test:e2e
 - [ ] LLM integration for Planner and Synthesis agents
 - [x] OpenAlex connector
 - [x] Local source snapshots, passage records, draft skeleton, and claim ledger
-- [ ] Crossref and arXiv connectors
+- [x] Crossref and arXiv connectors
 - [ ] Web crawler with robots.txt compliance
 - [ ] PDF and HTML extraction
 - [ ] Passage-level citation tracking

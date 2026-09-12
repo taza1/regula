@@ -109,6 +109,7 @@ class CreateRunRequest(BaseModel):
     date_range_end: Optional[str] = None
     languages: List[str] = Field(default_factory=lambda: ["en"])
     approved_source_domains: List[str] = Field(default_factory=list)
+    excluded_domains: List[str] = Field(default_factory=list)
     max_sources: int = 100
     max_cost_usd: float = 50.0
 
@@ -345,6 +346,7 @@ async def create_research_run(
             ),
             languages=request.languages,
             approved_source_domains=request.approved_source_domains,
+            excluded_domains=request.excluded_domains,
             max_sources=request.max_sources,
             max_cost_usd=request.max_cost_usd
         )

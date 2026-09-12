@@ -11,11 +11,14 @@ flowchart TD
     E --> F[Review subquestions and search queries]
     F --> G[Confirm scope]
     G --> H[Run becomes queued]
-    H --> I[Discover local fixtures or OpenAlex works]
-    I --> J[Validate tenant, project, role, and run state]
+    H --> I[Discover local fixtures or scholarly providers]
+    I --> I2[OpenAlex, Crossref, and arXiv metadata]
+    I2 --> I3[Deduplicate by DOI, arXiv, provider, and canonical IDs]
+    I3 --> J[Validate tenant, project, role, run, domain, and license policy]
     J --> K[Persist source records in SQLite]
     K --> L[Ingest abstracts/passages as evidence]
-    L --> M[Create cited draft skeleton and claim ledger]
+    L --> L2[Optional approved PDF/HTML extraction and chunking]
+    L2 --> M[Create cited draft skeleton and claim ledger]
     M --> N[Search evidence]
     N --> O[Rank matching paper passages]
     O --> P[Retrieve evidence by ID]
@@ -45,11 +48,12 @@ draft skeletons, indexing, keyword search, local project membership checks, and
 legal run-state transitions. By default `execute-local` uses
 deterministic local fixtures and makes no external network calls. Set
 `SOURCE_CONNECTOR=openalex` or launch with
-`.\run_local.ps1 -SourceConnector openalex_with_local_fallback` to discover real
-OpenAlex paper metadata and ingest available abstracts as evidence.
+`.\run_local.ps1 -SourceConnector scholarly_with_local_fallback` to discover
+real OpenAlex, Crossref, and arXiv metadata and ingest available abstracts as
+evidence. Results are deduplicated across providers before ingestion.
 Cancelled and terminal runs cannot be revived by a later confirmation or worker
 call.
 
-Crossref, arXiv, governed crawling, background workers, report synthesis, and
-production Azure storage/search integrations are not yet connected. The local
+Governed crawling, background workers, report synthesis, and production Azure
+storage/search integrations are not yet connected. The local
 draft skeleton is not a reviewed or release-ready report.

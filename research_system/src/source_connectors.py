@@ -9,7 +9,12 @@ without changing the evidence service.
 from __future__ import annotations
 
 import hashlib
+import html
 import re
+import random
+import threading
+import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
@@ -22,6 +27,45 @@ from src.models import (
     SourceType,
     SourceUseDecision,
 )
+
+_THROTTLE_LOCK = threading.Lock()
+_LAST_REQUEST_BY_DOMAIN: dict[str, float] = {}
+
+
+def _request_with_retry(
+    url: str,
+    *,
+    params: dict[str, Any],
+    timeout: float,
+    headers: dict[str, str],
+    min_interval_seconds: float = 0.0,
+    retries: int = 3,
+    backoff_seconds: float = 0.5,
+):
+    """Perform a polite, bounded request with retry/backoff for transient failures."""
+
+    domain = re.sub(r"^https?://", "", url).split("/", 1)[0].casefold()
+    for attempt in range(retries + 1):
+        with _THROTTLE_LOCK:
+            elapsed = time.monotonic() - _LAST_REQUEST_BY_DOMAIN.get(domain, 0.0)
+            delay = max(0.0, min_interval_seconds - elapsed)
+            if delay:
+                time.sleep(delay)
+            _LAST_REQUEST_BY_DOMAIN[domain] = time.monotonic()
+        try:
+            response = requests.get(url, params=params, timeout=timeout, headers=headers)
+            status = getattr(response, "status_code", 200)
+            if status == 429 or status >= 500:
+                if attempt < retries:
+                    time.sleep(backoff_seconds * (2 ** attempt) + random.uniform(0, 0.1))
+                    continue
+            response.raise_for_status()
+            return response
+        except requests.RequestException:
+            if attempt >= retries:
+                raise
+            time.sleep(backoff_seconds * (2 ** attempt) + random.uniform(0, 0.1))
+    raise RuntimeError("request retry loop exited unexpectedly")
 
 
 class SourceRecord(BaseModel):
@@ -122,11 +166,13 @@ class OpenAlexConnector:
         mailto: str = "",
         timeout_seconds: float = 20.0,
         latest_query_days: int = 180,
+        request_interval_seconds: float = 0.1,
     ):
         self.base_url = base_url.rstrip("/")
         self.mailto = mailto.strip()
         self.timeout_seconds = timeout_seconds
         self.latest_query_days = latest_query_days
+        self.request_interval_seconds = request_interval_seconds
 
     async def search(
         self,
@@ -189,11 +235,12 @@ class OpenAlexConnector:
         if self.mailto:
             params["mailto"] = self.mailto
 
-        response = requests.get(
+        response = _request_with_retry(
             f"{self.base_url}/works",
             params=params,
             timeout=self.timeout_seconds,
             headers={"User-Agent": _user_agent(self.mailto)},
+            min_interval_seconds=self.request_interval_seconds,
         )
         response.raise_for_status()
         data = response.json()
@@ -268,16 +315,250 @@ class OpenAlexConnector:
         )
 
 
-class CrossrefConnector(RemoteSourceConnector):
-    """Future Crossref adapter contract."""
+class CrossrefConnector:
+    """Crossref Works API adapter."""
 
     name = "crossref"
 
+    def __init__(self, *, base_url="https://api.crossref.org", mailto="", timeout_seconds=20.0,
+                 latest_query_days=180, request_interval_seconds=0.1):
+        self.base_url = base_url.rstrip("/")
+        self.mailto = mailto.strip()
+        self.timeout_seconds = timeout_seconds
+        self.latest_query_days = latest_query_days
+        self.request_interval_seconds = request_interval_seconds
 
-class ArxivConnector(RemoteSourceConnector):
-    """Future arXiv adapter contract."""
+    async def search(self, query, *, limit=20, date_range_start=None, date_range_end=None):
+        import asyncio
+        return await asyncio.to_thread(self.search_sync, query, limit=limit,
+                                       date_range_start=date_range_start, date_range_end=date_range_end)
+
+    def search_sync(self, query, *, limit=20, date_range_start=None, date_range_end=None):
+        normalized = " ".join(query.split())
+        if not normalized or int(limit) <= 0:
+            return []
+        if date_range_start is None and _looks_like_latest_query(normalized):
+            date_range_start = datetime.utcnow() - timedelta(days=self.latest_query_days)
+            date_range_end = date_range_end or datetime.utcnow()
+        bounded_limit = min(max(int(limit), 1), 1000)
+        params = {"query": normalized, "rows": bounded_limit}
+        if self.mailto:
+            params["mailto"] = self.mailto
+        if date_range_start:
+            params["filter"] = f"from-pub-date:{date_range_start.date().isoformat()}"
+        if date_range_end:
+            end_filter = f"until-pub-date:{date_range_end.date().isoformat()}"
+            params["filter"] = f"{params['filter']},{end_filter}" if "filter" in params else end_filter
+        response = _request_with_retry(
+            f"{self.base_url}/works", params=params, timeout=self.timeout_seconds,
+            headers={"User-Agent": _user_agent(self.mailto)},
+            min_interval_seconds=self.request_interval_seconds,
+        )
+        response.raise_for_status()
+        items = response.json().get("message", {}).get("items", [])
+        return [record for item in items if (record := self._record_from_work(item)) is not None][:bounded_limit]
+
+    def _record_from_work(self, item):
+        doi = _clean_doi(item.get("DOI"))
+        resource = item.get("resource") or {}
+        url = item.get("URL") or (resource.get("primary") or {}).get("URL")
+        if not url and doi:
+            url = f"https://doi.org/{doi}"
+        title = next((str(value).strip() for value in item.get("title", []) if str(value).strip()), "")
+        if not title or not (doi or url):
+            return None
+        abstract = _clean_markup(item.get("abstract", ""))
+        if not abstract:
+            abstract = "Crossref returned metadata for this work, but no abstract text was available."
+        authors = []
+        for author in item.get("author", []):
+            name = " ".join(str(author.get(key, "")).strip() for key in ("given", "family")).strip()
+            authors.append(name or str(author.get("name", "")).strip())
+        authors = [author for author in authors if author]
+        work_type = str(item.get("type", "")).casefold()
+        is_preprint = work_type == "posted-content" or "preprint" in work_type
+        return SourceRecord(
+            source_id="CROSSREF-" + _stable_id(doi or url),
+            connector=self.name, title=title, url=str(url),
+            source_type=SourceType.PREPRINT if is_preprint else SourceType.PAPER,
+            abstract=abstract, authors=authors, doi=doi,
+            published_at=_crossref_date(item),
+            peer_review_status=(PeerReviewStatus.PREPRINT if is_preprint else
+                                PeerReviewStatus.PEER_REVIEWED if work_type in
+                                {"journal-article", "book-chapter", "proceedings-article"} else
+                                PeerReviewStatus.UNKNOWN),
+            license=_crossref_license(item),
+            metadata={"crossref_doi": doi, "doi": doi, "container_title": (item.get("container-title") or [None])[0],
+                      "publisher": item.get("publisher"), "type": item.get("type"),
+                      "is_referenced_by_count": item.get("is-referenced-by-count")},
+            policy_version="CROSSREF-1",
+        )
+
+
+class ArxivConnector:
+    """arXiv Atom API adapter."""
 
     name = "arxiv"
+
+    def __init__(self, *, base_url="https://export.arxiv.org/api/query", timeout_seconds=20.0,
+                 request_interval_seconds=3.0):
+        self.base_url = base_url
+        self.timeout_seconds = timeout_seconds
+        self.request_interval_seconds = request_interval_seconds
+
+    async def search(self, query, *, limit=20, date_range_start=None, date_range_end=None):
+        import asyncio
+        return await asyncio.to_thread(self.search_sync, query, limit=limit,
+                                       date_range_start=date_range_start, date_range_end=date_range_end)
+
+    def search_sync(self, query, *, limit=20, date_range_start=None, date_range_end=None):
+        normalized = " ".join(query.split())
+        if not normalized or int(limit) <= 0:
+            return []
+        bounded_limit = min(max(int(limit), 1), 100)
+        response = _request_with_retry(
+            self.base_url,
+            params={"search_query": f"all:{normalized}", "start": 0, "max_results": bounded_limit},
+            timeout=self.timeout_seconds, headers={"User-Agent": _user_agent("")},
+            min_interval_seconds=self.request_interval_seconds,
+        )
+        response.raise_for_status()
+        root = ET.fromstring(response.text if hasattr(response, "text") else response.content)
+        records = []
+        for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
+            record = self._record_from_entry(entry)
+            if record and _in_date_range(record.published_at, date_range_start, date_range_end):
+                records.append(record)
+        return records[:bounded_limit]
+
+    def _record_from_entry(self, entry):
+        atom = "{http://www.w3.org/2005/Atom}"
+        arxiv_ns = "{http://arxiv.org/schemas/atom}"
+        raw_id = (entry.findtext(atom + "id") or "").strip()
+        arxiv_id = _arxiv_id(raw_id)
+        title = " ".join((entry.findtext(atom + "title") or "").split())
+        if not arxiv_id or not title:
+            return None
+        links = entry.findall(atom + "link")
+        abs_url = next((link.get("href") for link in links if link.get("rel") == "alternate"), None)
+        pdf_url = next((link.get("href") for link in links if link.get("title") == "pdf"), None)
+        license_url = next((link.get("href") for link in links if "license" in (link.get("rel") or "").casefold()), None)
+        doi = _clean_doi(entry.findtext(arxiv_ns + "doi"))
+        return SourceRecord(
+            source_id="ARXIV-" + _stable_id(arxiv_id), connector=self.name, title=title,
+            url=abs_url or f"http://arxiv.org/abs/{arxiv_id}", source_type=SourceType.PREPRINT,
+            abstract=" ".join((entry.findtext(atom + "summary") or "").split()),
+            authors=[name for name in (author.findtext(atom + "name") for author in entry.findall(atom + "author"))
+                     if name],
+            doi=doi, published_at=_parse_date(entry.findtext(atom + "published")),
+            peer_review_status=PeerReviewStatus.PREPRINT, license=license_url,
+            metadata={"arxiv_id": arxiv_id,
+                      "primary_category": (entry.find(arxiv_ns + "primary_category") or {}).get("term"),
+                      "categories": [node.get("term") for node in entry.findall(atom + "category") if node.get("term")],
+                      "journal_ref": entry.findtext(arxiv_ns + "journal_ref"),
+                      "comment": entry.findtext(arxiv_ns + "comment"), "pdf_url": pdf_url},
+            policy_version="ARXIV-1",
+        )
+
+
+class CompositeScholarlyConnector:
+    """Aggregate scholarly providers while collapsing cross-provider duplicates."""
+
+    name = "scholarly"
+
+    def __init__(self, connectors):
+        self.connectors = tuple(connectors)
+
+    async def search(self, query, *, limit=20, date_range_start=None, date_range_end=None):
+        import asyncio
+        results = []
+        for connector in self.connectors:
+            try:
+                results.extend(await connector.search(query, limit=limit, date_range_start=date_range_start,
+                                                     date_range_end=date_range_end))
+            except Exception:
+                continue
+        return deduplicate_sources(results)[:max(0, int(limit))]
+
+
+def deduplicate_sources(sources):
+    """Collapse records sharing DOI, arXiv, OpenAlex, or canonical identifiers."""
+    seen = set()
+    unique = []
+    for source in sources:
+        identifiers = _source_identifiers(source)
+        if identifiers & seen:
+            continue
+        seen.update(identifiers)
+        unique.append(source)
+    return unique
+
+
+def _clean_markup(value):
+    return " ".join(re.sub(r"<[^>]+>", " ", html.unescape(str(value or ""))).split())
+
+
+def _crossref_date(item):
+    for key in ("published", "published-online", "published-print", "issued"):
+        parts = (item.get(key) or {}).get("date-parts", [])
+        if parts and parts[0]:
+            values = parts[0]
+            try:
+                return datetime(int(values[0]), int(values[1]) if len(values) > 1 else 1,
+                                int(values[2]) if len(values) > 2 else 1)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _crossref_license(item):
+    for license_item in item.get("license", []) or []:
+        url = license_item.get("URL") if isinstance(license_item, dict) else None
+        if url:
+            return url
+    return None
+
+
+def _arxiv_id(value):
+    abs_match = re.search(r"/abs/([^/?#]+)", value.casefold())
+    if abs_match:
+        return re.sub(r"v\d+$", "", abs_match.group(1))
+    match = re.search(r"(?:arxiv[.:/])?(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+[./]\d{4,5}(?:v\d+)?)", value.casefold())
+    result = match.group(1) if match else value.rsplit("/", 1)[-1]
+    return re.sub(r"v\d+$", "", result.removesuffix("."))
+
+
+def _source_identifiers(source):
+    identifiers = set()
+    doi = _clean_doi(source.doi)
+    if doi:
+        identifiers.add("doi:" + doi.casefold())
+        if "10.48550/arxiv." in doi.casefold():
+            identifiers.add("arxiv:" + _arxiv_id(doi))
+    metadata = source.metadata or {}
+    for key in ("doi", "crossref_doi"):
+        value = _clean_doi(metadata.get(key))
+        if value:
+            identifiers.add("doi:" + value.casefold())
+    for key in ("arxiv_id", "openalex_id"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            identifiers.add(key + ":" + (_arxiv_id(value) if key == "arxiv_id" else value.rstrip("/").casefold()))
+    for value in (source.source_id, source.url):
+        if isinstance(value, str) and value:
+            if "arxiv" in value.casefold():
+                identifiers.add("arxiv:" + _arxiv_id(value))
+            if "openalex.org/" in value.casefold():
+                identifiers.add("openalex:" + value.rstrip("/").rsplit("/", 1)[-1].casefold())
+    identifiers.add("canonical:" + _stable_id(source.title.casefold()))
+    return identifiers
+
+
+def _in_date_range(value, start, end):
+    if value is None:
+        return False
+    value_date = value.date()
+    return (start is None or value_date >= start.date()) and (end is None or value_date <= end.date())
 
 
 def _tokens(value: str) -> set[str]:
@@ -493,7 +774,8 @@ def _clean_doi(value: Any) -> Optional[str]:
     if not isinstance(value, str) or not value.strip():
         return None
     doi = value.strip()
-    return doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
+    doi = doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
+    return doi.removeprefix("doi:").rstrip(".,;")
 
 
 def _openalex_license(item: dict[str, Any]) -> Optional[str]:

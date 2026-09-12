@@ -104,7 +104,7 @@ class ResearchConfig(BaseSettings):
     # Source discovery limits
     source_connector: str = Field(
         default="local",
-        description="Source connector: local, openalex, or openalex_with_local_fallback",
+        description="Source connector: local, openalex, crossref, arxiv, scholarly_with_local_fallback, or openalex_with_local_fallback",
     )
     openalex_base_url: str = Field(
         default="https://api.openalex.org",
@@ -118,6 +118,23 @@ class ResearchConfig(BaseSettings):
         default=20.0,
         gt=0,
         description="Timeout for OpenAlex source discovery requests",
+    )
+    openalex_request_interval_seconds: float = Field(default=0.1, ge=0, description="Minimum delay between OpenAlex requests")
+    crossref_base_url: str = Field(default="https://api.crossref.org", description="Crossref API base URL")
+    crossref_mailto: str = Field(default="", description="Optional email for Crossref polite pool requests")
+    crossref_timeout_seconds: float = Field(default=20.0, gt=0, description="Timeout for Crossref requests")
+    crossref_request_interval_seconds: float = Field(default=0.1, ge=0, description="Minimum delay between Crossref requests")
+    arxiv_base_url: str = Field(default="https://export.arxiv.org/api/query", description="arXiv API URL")
+    arxiv_timeout_seconds: float = Field(default=20.0, gt=0, description="Timeout for arXiv requests")
+    arxiv_request_interval_seconds: float = Field(default=3.0, ge=0, description="Minimum delay between arXiv requests")
+    source_policy_version: str = Field(default="SOURCE-POLICY-1", description="Source governance policy version")
+    allowed_source_licenses: List[str] = Field(
+        default=["cc-by", "cc0", "public domain", "open access", "arxiv"],
+        description="Case-insensitive license labels or URL fragments permitted for extraction",
+    )
+    require_permissive_license: bool = Field(
+        default=False,
+        description="Reject sources without an explicitly recognized permissive license",
     )
     latest_query_days: int = Field(
         default=180,
