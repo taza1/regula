@@ -311,7 +311,7 @@ def test_source_governance_enforces_domains_and_licenses():
     )
 
 
-def test_html_extraction_and_chunk_deduplication():
+def test_html_extraction_and_chunk_deduplication(monkeypatch):
     class Response:
         content = b"<html><body><h1>Title</h1><p>First paragraph.</p><script>bad()</script><p>Second paragraph.</p></body></html>"
         headers = {"Content-Type": "text/html"}
@@ -326,9 +326,9 @@ def test_html_extraction_and_chunk_deduplication():
         url="https://open.example/article",
         license="cc-by",
     )
-    document = fetch_document(source, approved_domains=["open.example"], session=type(
-        "Session", (), {"get": staticmethod(lambda *args, **kwargs: Response())}
-    ))
+    monkeypatch.setattr("src.evidence_extraction._download", lambda *args: (
+        Response.content, Response.headers, source.url))
+    document = fetch_document(source, approved_domains=["open.example"])
     assert document.media_type == "text/html"
     chunks = chunk_text("One paragraph.\n\nOne paragraph.\n\nA longer second paragraph.", max_chars=40, overlap_chars=5)
     assert len(chunks) == 2

@@ -9,12 +9,12 @@ without changing the evidence service.
 from __future__ import annotations
 
 import hashlib
-import html
 import re
 import random
 import threading
 import time
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
+from itertools import zip_longest
 from datetime import datetime, timedelta
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
@@ -30,6 +30,28 @@ from src.models import (
 
 _THROTTLE_LOCK = threading.Lock()
 _LAST_REQUEST_BY_DOMAIN: dict[str, float] = {}
+
+
+class SourceResults(list):
+    """List-compatible results with per-request provider outcomes (no shared state)."""
+
+    def __init__(self, values=(), outcomes=()):
+        super().__init__(values)
+        self.outcomes = list(outcomes)
+
+
+async def search_with_outcome(connector, query, **kwargs):
+    try:
+        results = await connector.search(query, **kwargs)
+        if isinstance(results, SourceResults):
+            return results
+        return SourceResults(results, [{"provider": connector.name,
+                                       "status": "success" if results else "empty"}])
+    except Exception as exc:
+        status = "timeout" if isinstance(exc, (requests.Timeout, TimeoutError)) else "failed"
+        if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code == 429:
+            status = "rate_limited"
+        return SourceResults(outcomes=[{"provider": connector.name, "status": status}])
 
 
 def _request_with_retry(
@@ -169,7 +191,7 @@ class OpenAlexConnector:
         request_interval_seconds: float = 0.1,
     ):
         self.base_url = base_url.rstrip("/")
-        self.mailto = mailto.strip()
+        self.mailto = " ".join(mailto.split())
         self.timeout_seconds = timeout_seconds
         self.latest_query_days = latest_query_days
         self.request_interval_seconds = request_interval_seconds
@@ -323,7 +345,7 @@ class CrossrefConnector:
     def __init__(self, *, base_url="https://api.crossref.org", mailto="", timeout_seconds=20.0,
                  latest_query_days=180, request_interval_seconds=0.1):
         self.base_url = base_url.rstrip("/")
-        self.mailto = mailto.strip()
+        self.mailto = " ".join(mailto.split())
         self.timeout_seconds = timeout_seconds
         self.latest_query_days = latest_query_days
         self.request_interval_seconds = request_interval_seconds
@@ -401,10 +423,12 @@ class ArxivConnector:
     name = "arxiv"
 
     def __init__(self, *, base_url="https://export.arxiv.org/api/query", timeout_seconds=20.0,
-                 request_interval_seconds=3.0):
+                 request_interval_seconds=3.0, latest_query_days=180, max_pages=5):
         self.base_url = base_url
         self.timeout_seconds = timeout_seconds
         self.request_interval_seconds = request_interval_seconds
+        self.latest_query_days = latest_query_days
+        self.max_pages = max(1, min(int(max_pages), 10))
 
     async def search(self, query, *, limit=20, date_range_start=None, date_range_end=None):
         import asyncio
@@ -416,19 +440,41 @@ class ArxivConnector:
         if not normalized or int(limit) <= 0:
             return []
         bounded_limit = min(max(int(limit), 1), 100)
-        response = _request_with_retry(
-            self.base_url,
-            params={"search_query": f"all:{normalized}", "start": 0, "max_results": bounded_limit},
-            timeout=self.timeout_seconds, headers={"User-Agent": _user_agent("")},
-            min_interval_seconds=self.request_interval_seconds,
-        )
-        response.raise_for_status()
-        root = ET.fromstring(response.text if hasattr(response, "text") else response.content)
+        recent = _looks_like_latest_query(normalized)
+        if date_range_start is None and recent:
+            date_range_start = datetime.utcnow() - timedelta(days=self.latest_query_days)
+            date_range_end = date_range_end or datetime.utcnow()
+        query_text = f"all:({normalized})"
+        if date_range_start or date_range_end:
+            start = date_range_start.strftime("%Y%m%d0000") if date_range_start else "199101010000"
+            end = date_range_end.strftime("%Y%m%d2359") if date_range_end else datetime.utcnow().strftime("%Y%m%d2359")
+            query_text += f" AND submittedDate:[{start} TO {end}]"
         records = []
-        for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
-            record = self._record_from_entry(entry)
-            if record and _in_date_range(record.published_at, date_range_start, date_range_end):
-                records.append(record)
+        seen = set()
+        for page in range(self.max_pages):
+            response = _request_with_retry(
+                self.base_url,
+                params={"search_query": query_text, "start": page * bounded_limit,
+                        "max_results": bounded_limit, "sortBy": "submittedDate" if recent or date_range_start or date_range_end else "relevance",
+                        "sortOrder": "descending"},
+                timeout=self.timeout_seconds, headers={"User-Agent": _user_agent("")},
+                min_interval_seconds=self.request_interval_seconds,
+            )
+            payload = response.text if hasattr(response, "text") else response.content
+            if len(payload.encode("utf-8") if isinstance(payload, str) else payload) > 2_000_000:
+                raise ValueError("arXiv XML payload exceeds limit")
+            try:
+                root = ET.fromstring(payload)
+            except Exception as exc:
+                raise ValueError("Invalid arXiv XML response") from exc
+            entries = root.findall("{http://www.w3.org/2005/Atom}entry")
+            for entry in entries:
+                record = self._record_from_entry(entry)
+                if record and record.source_id not in seen and _in_date_range(record.published_at, date_range_start, date_range_end):
+                    seen.add(record.source_id)
+                    records.append(record)
+            if len(records) >= bounded_limit or len(entries) < bounded_limit:
+                break
         return records[:bounded_limit]
 
     def _record_from_entry(self, entry):
@@ -453,7 +499,8 @@ class ArxivConnector:
             doi=doi, published_at=_parse_date(entry.findtext(atom + "published")),
             peer_review_status=PeerReviewStatus.PREPRINT, license=license_url,
             metadata={"arxiv_id": arxiv_id,
-                      "primary_category": (entry.find(arxiv_ns + "primary_category") or {}).get("term"),
+                      "primary_category": (entry.find(arxiv_ns + "primary_category").get("term")
+                                           if entry.find(arxiv_ns + "primary_category") is not None else None),
                       "categories": [node.get("term") for node in entry.findall(atom + "category") if node.get("term")],
                       "journal_ref": entry.findtext(arxiv_ns + "journal_ref"),
                       "comment": entry.findtext(arxiv_ns + "comment"), "pdf_url": pdf_url},
@@ -471,14 +518,12 @@ class CompositeScholarlyConnector:
 
     async def search(self, query, *, limit=20, date_range_start=None, date_range_end=None):
         import asyncio
-        results = []
-        for connector in self.connectors:
-            try:
-                results.extend(await connector.search(query, limit=limit, date_range_start=date_range_start,
-                                                     date_range_end=date_range_end))
-            except Exception:
-                continue
-        return deduplicate_sources(results)[:max(0, int(limit))]
+        batches = await asyncio.gather(*(search_with_outcome(
+            connector, query, limit=limit, date_range_start=date_range_start,
+            date_range_end=date_range_end) for connector in self.connectors))
+        interleaved = [item for row in zip_longest(*batches) for item in row if item is not None]
+        return SourceResults(deduplicate_sources(interleaved)[:max(0, int(limit))],
+                             [outcome for batch in batches for outcome in batch.outcomes])
 
 
 def deduplicate_sources(sources):
@@ -495,7 +540,11 @@ def deduplicate_sources(sources):
 
 
 def _clean_markup(value):
-    return " ".join(re.sub(r"<[^>]+>", " ", html.unescape(str(value or ""))).split())
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(str(value or ""), "html.parser")
+    for node in soup(["script", "style"]):
+        node.decompose()
+    return " ".join(soup.get_text(" ").split())
 
 
 def _crossref_date(item):
@@ -725,26 +774,15 @@ class FallbackSourceConnector:
         date_range_start: Optional[datetime] = None,
         date_range_end: Optional[datetime] = None,
     ) -> list[SourceRecord]:
-        try:
-            results = await self.primary.search(
-                query,
-                limit=limit,
-                date_range_start=date_range_start,
-                date_range_end=date_range_end,
-            )
-        except Exception:
-            return await self.fallback.search(
-                query,
-                limit=limit,
-                date_range_start=date_range_start,
-                date_range_end=date_range_end,
-            )
-        return results or await self.fallback.search(
-            query,
-            limit=limit,
-            date_range_start=date_range_start,
-            date_range_end=date_range_end,
-        )
+        options = dict(limit=limit, date_range_start=date_range_start, date_range_end=date_range_end)
+        results = await search_with_outcome(self.primary, query, **options)
+        if results:
+            return results
+        fallback = await search_with_outcome(self.fallback, query, **options)
+        labeled = [item.model_copy(update={"metadata": {**item.metadata, "fallback": True,
+                                                       "synthetic": self.fallback.name == "local"}})
+                   for item in fallback]
+        return SourceResults(labeled, results.outcomes + [dict(item, fallback=True) for item in fallback.outcomes])
 
 
 def _abstract_from_inverted_index(value: Any) -> str:
@@ -808,6 +846,7 @@ def _openalex_search_text(query: str) -> str:
 
 
 def _user_agent(mailto: str) -> str:
+    mailto = " ".join(mailto.split())
     if mailto:
         return f"research-system-local/0.1 (mailto:{mailto})"
     return "research-system-local/0.1"

@@ -54,6 +54,29 @@ class LocalStateStore:
     ) -> None:
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self._connect() as connection:
+            if kind == "source_snapshot":
+                connection.execute(
+                    "INSERT OR IGNORE INTO entities "
+                    "(kind, tenant_id, project_id, entity_id, payload) VALUES (?, ?, ?, ?, ?)",
+                    (kind, tenant_id, project_id, entity_id, serialized),
+                )
+                existing = json.loads(connection.execute(
+                    "SELECT payload FROM entities WHERE kind=? AND tenant_id=? AND project_id=? AND entity_id=?",
+                    (kind, tenant_id, project_id, entity_id),
+                ).fetchone()["payload"])
+                # A retry preserves the first retrieval timestamp and all stored bytes.
+                def comparable(value: Any) -> Any:
+                    if isinstance(value, dict):
+                        return {key: comparable(item) for key, item in value.items()
+                                if key not in {"created_at", "retrieved_at"}}
+                    if isinstance(value, list):
+                        return [comparable(item) for item in value]
+                    return value
+                if comparable(existing) != comparable(payload):
+                    changed = sorted(key for key in set(existing) | set(payload)
+                                     if comparable(existing.get(key)) != comparable(payload.get(key)))
+                    raise ValueError(f"Immutable snapshot conflict: {', '.join(changed)}")
+                return
             connection.execute(
                 """
                 INSERT INTO entities (kind, tenant_id, project_id, entity_id, payload)

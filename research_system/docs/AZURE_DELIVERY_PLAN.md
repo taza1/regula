@@ -1,6 +1,6 @@
 # Azure Delivery Plan
 
-Last reviewed: 2026-09-11
+Last reviewed: 2026-09-12
 
 ## Outcome
 
@@ -10,36 +10,39 @@ This is a plan-only review. No Azure resources were created or changed as part o
 
 ## Current Baseline
 
-The repo is no longer just the original scaffold. The current branch at `2ff32d6` has a working local vertical slice:
+The repo is no longer just the original scaffold. The research branch now includes the merged scholarly connector and local hardening work:
 
 - FastAPI project and run lifecycle.
 - Mock and Azure planner clients.
 - SQLite-backed local persistence.
 - Deterministic offline source discovery and ingestion.
-- OpenAlex paper discovery with latest-query recency handling.
+- OpenAlex, Crossref, and arXiv discovery with provider outcomes, retry handling, throttling, and recency handling.
+- Allowlisted HTML/PDF retrieval with redirect and resolved-address checks, bounded streaming, text extraction, and chunking.
+- Insert-only local source snapshots that reject conflicting writes.
 - Tenant/project/run-scoped evidence storage.
 - Ranked local keyword evidence search.
-- Python tests passing: `19 passed, 1 warning`.
+- Python tests passing on 2026-09-12: `41 passed, 1 warning`.
+- A GitHub Actions workflow defines deterministic Python and Playwright checks; its first hosted run remains pending push.
 
-The current Azure subscription is accessible through Azure CLI, and the existing Foundry resource group contains a Foundry account/project with these model deployments:
+The Azure inventory below was last verified on 2026-09-11 and was not refreshed during the 2026-09-12 code-validation round. At that verification point, Azure CLI could access the subscription and the Foundry resource group contained a Foundry account/project with these model deployments:
 
 | Deployment | Model | Version | SKU | State |
 | --- | --- | --- | --- | --- |
 | `gpt-5-mini` | `gpt-5-mini` | `2025-08-07` | `GlobalStandard` | `Succeeded` |
 | `gpt-5.6-sol` | `gpt-5.6-sol` | `2026-07-09` | `GlobalStandard` | `Succeeded` |
 
-The resource inventory in `rg-foundry-agent-dev` currently shows only the Foundry account/project. Cosmos DB, Blob Storage, Azure AI Search, Service Bus, Key Vault, and monitoring resources still need to be provisioned for the full system.
+At the 2026-09-11 verification point, `rg-foundry-agent-dev` showed only the Foundry account/project. Cosmos DB, Blob Storage, Azure AI Search, Service Bus, Key Vault, and monitoring resources still need to be provisioned for the full system.
 
 ## Current Gaps
 
 The local app is useful for development, but it is not yet an end-to-end research platform:
 
-- The API trusts caller-supplied `tenant_id` query parameters and uses placeholder identities.
+- The API uses header-based local development identity and project membership checks; production Entra token validation is not implemented.
 - Only the planner is wired as an agent; source search, research synthesis, fact check, citation validation, critical review, safety, and evaluator agents are not implemented.
-- `execute-local` can use deterministic local fixtures or OpenAlex paper discovery, but Crossref/arXiv and governed web discovery are not implemented.
+- `execute-local` can use deterministic local fixtures or scholarly metadata discovery. Full-document ingestion is an explicit service path and is not yet wired into the default API execution flow.
 - Evidence storage is SQLite JSON records, not immutable Blob originals plus Cosmos metadata and Azure AI Search indexes.
 - Search is local term counting over stored evidence, not hybrid keyword/vector/semantic retrieval.
-- Evidence independence is currently inferred from `source_id`; that is not enough for publication gates.
+- Cross-provider publication deduplication is implemented, but evidence independence still does not identify shared studies or datasets reliably enough for publication gates.
 - Release is intentionally blocked at the API with `501`. Lower-level release service stubs still contain placeholder Blob URLs and must not be exposed.
 - State updates are unconditional local upserts, not ETag/epoch-guarded transitions.
 - Azure deployment assets, Azure DevOps pipelines, IaC, observability, and fault-injection tests are not in place.

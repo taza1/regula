@@ -56,12 +56,12 @@
 
 Acceptance criteria and parent task mappings: [Hardening backlog](docs/HARDENING_BACKLOG.md).
 
-- [ ] HARD-001 (P0): Harden document fetching with redirect/address validation and streaming download limits.
-- [ ] HARD-002 (P1): Report provider failures and partial results explicitly.
-- [ ] HARD-003 (P1): Fix arXiv date-filtered recency retrieval and bounded pagination.
-- [ ] HARD-004 (P1): Enforce snapshot immutability with atomic persistence and retry tests.
-- [ ] HARD-005 (P1): Add research-system Python and Playwright CI.
-- [ ] HARD-006 (P2): Refresh Azure plan and completion labels against verified code.
+- [x] HARD-001 (P0): Harden document fetching with redirect/address validation and streaming download limits.
+- [x] HARD-002 (P1): Report provider failures and partial results explicitly.
+- [x] HARD-003 (P1): Fix arXiv date-filtered recency retrieval and bounded pagination.
+- [x] HARD-004 (P1): Enforce snapshot immutability with atomic persistence and retry tests.
+- [x] HARD-005 (P1): Add research-system Python and Playwright CI workflow (hosted run pending push).
+- [x] HARD-006 (P2): Refresh Azure plan and completion labels against verified code.
 
 ## Definition of done for the next release
 

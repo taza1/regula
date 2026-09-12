@@ -1,6 +1,6 @@
 # Azure Task Breakdown
 
-Last reviewed: 2026-09-11
+Last reviewed: 2026-09-12
 
 This breakdown maps the original 35 task IDs into an execution order that gets the system working locally first, then on Azure, then through review and internal release.
 
@@ -88,8 +88,8 @@ These are the first implementation tickets I would open:
 | Done | Replace query-string tenant/user trust with an auth context dependency and local dev identity adapter. | TASK-002, TASK-003 | Direct cross-tenant API calls fail in tests. |
 | Done | Add legal run transition table and local revision checks. | TASK-002, TASK-017 | Confirming, cancelling, and local execution cannot revive terminal runs. |
 | P0 | Add run epochs/stale worker protection for background execution. | TASK-002, TASK-017 | Retried or late worker results are rejected after cancellation, retry, policy change, or successor run creation. |
-| P0 | Harden OpenAlex connector and add Crossref/arXiv behind the same source interface. | TASK-007 | A local run ingests real normalized scholarly metadata from multiple scholarly providers with retries and attribution. |
-| Done | Persist immutable local source snapshots and passage records. | TASK-010, TASK-011 | Evidence has hash, retrieval timestamp, source ID, passage location, and eligibility. |
+| Done | Harden OpenAlex connector and add Crossref/arXiv behind the same source interface. | TASK-007 | Local discovery returns normalized metadata with retries, attribution, and visible provider outcomes. |
+| Done | Persist immutable local source snapshots and abstract-level passage records. | TASK-010, TASK-011 | Snapshot conflicts are rejected and evidence contains source and passage references. Precise PDF page/section coordinates remain open under TASK-011. |
 | P1 | Add local FTS retrieval, then Azure AI Search schema. | TASK-012, TASK-013 | Search returns scoped, ranked evidence and fixture precision/recall thresholds pass. |
 | Done | Implement deterministic local draft skeleton plus claim ledger. | TASK-016, TASK-030 | Drafts cite eligible evidence and claims remain pending review. |
 | P1 | Implement reviewed LLM synthesis with insufficiency/contradiction handling. | TASK-016, TASK-030 | Unsupported claims are tracked as insufficient evidence and cannot enter a release-ready draft. |
@@ -100,7 +100,7 @@ These are the first implementation tickets I would open:
 
 ## Audit Follow-up Subtasks (2026-09-12)
 
-All six entries are open. Detailed scope and acceptance criteria are in the [hardening backlog](HARDENING_BACKLOG.md).
+All six entries are implemented locally. The hosted HARD-005 workflow run remains pending until push. Detailed scope and acceptance criteria are in the [hardening backlog](HARDENING_BACKLOG.md).
 
 | Subtask | Priority | Work | Parent tasks |
 | --- | --- | --- | --- |
@@ -111,7 +111,7 @@ All six entries are open. Detailed scope and acceptance criteria are in the [har
 | HARD-005 | P1 | Add research-system Python/Playwright CI alongside OPA checks. | TASK-024 |
 | HARD-006 | P2 | Reconcile Azure plan and completion labels with verified branch state. | TASK-001 |
 
-The earlier snapshot completion entry covers local snapshot/passages storage only; the immutability guarantee remains open under HARD-004.
+Local snapshot immutability is covered by retry and conflicting-write regression tests. Production Blob/Cosmos immutability remains part of the Azure implementation.
 
 ## Acceptance Test Matrix
 

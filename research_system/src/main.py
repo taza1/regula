@@ -560,6 +560,7 @@ async def execute_local_research(
             "state": RunState.COLLECTING.value,
             "source_count": len(result["sources"]),
             "evidence_count": len(result["evidence"]),
+            "provider_outcomes": result.get("provider_outcomes", []),
             "sources": [source.model_dump(mode="json") for source in result["sources"]],
             "evidence": [item.model_dump(mode="json") for item in result["evidence"]],
             "message": "Local discovery and evidence ingestion completed.",

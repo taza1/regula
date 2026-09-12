@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+import ipaddress
+import socket
+import time
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
-import requests
+import urllib3
 
 from src.source_connectors import SourceRecord
 
@@ -38,6 +41,75 @@ def _host_allowed(url: str, approved_domains: list[str], excluded_domains: list[
     )
 
 
+def _download(url, approved_domains, excluded_domains, timeout_seconds, max_bytes, max_redirects=5):
+    """Pin each connection to a validated public IP, retaining TLS hostname checks.
+
+    Proxy environment variables are intentionally not used for source downloads.
+    Only identity encoding is accepted to bound memory before decompression.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    for hop in range(max_redirects + 1):
+        if not approved_domains or not _host_allowed(url, approved_domains, excluded_domains):
+            raise ExtractionError("document URL is outside the approved source-domain policy")
+        parsed = urlparse(url)
+        if parsed.username or parsed.password or any(ord(c) < 32 for c in url):
+            raise ExtractionError("invalid document URL")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if port not in {80, 443}:
+            raise ExtractionError("document port is not permitted")
+        addresses = {entry[4][0] for entry in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)}
+        if not addresses or any(not ipaddress.ip_address(ip).is_global for ip in addresses):
+            raise ExtractionError("document address is not public")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ExtractionError("document download deadline exceeded")
+        address = sorted(addresses)[0]
+        pool_type = urllib3.HTTPSConnectionPool if parsed.scheme == "https" else urllib3.HTTPConnectionPool
+        tls_options = {"server_hostname": parsed.hostname, "assert_hostname": parsed.hostname,
+                       "cert_reqs": "CERT_REQUIRED"} if parsed.scheme == "https" else {}
+        pool = pool_type(address, port=port, **tls_options)
+        response = None
+        try:
+            path = parsed.path or "/"
+            if parsed.query:
+                path += "?" + parsed.query
+            response = pool.urlopen("GET", path, headers={"Host": parsed.netloc,
+                "User-Agent": "research-system-local/0.1", "Accept-Encoding": "identity"},
+                redirect=False, retries=False, preload_content=False,
+                timeout=urllib3.Timeout(total=remaining, connect=min(remaining, 5), read=min(remaining, 5)))
+            if response.status in {301, 302, 303, 307, 308}:
+                location = response.headers.get("Location")
+                if hop == max_redirects or not location:
+                    raise ExtractionError("document redirect limit or invalid redirect")
+                url = urljoin(url, location)
+                continue
+            if response.status != 200:
+                raise ExtractionError("document retrieval failed")
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise ExtractionError("compressed document transfer is not permitted")
+            length = response.headers.get("Content-Length")
+            if length is not None and (not length.isdigit() or int(length) > max_bytes):
+                raise ExtractionError("document exceeds the configured maximum size")
+            content = bytearray()
+            while True:
+                if time.monotonic() >= deadline:
+                    raise ExtractionError("document download deadline exceeded")
+                chunk = response.read1(min(65536, max_bytes + 1 - len(content)), decode_content=False)
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > max_bytes:
+                    raise ExtractionError("document exceeds the configured maximum size")
+            return bytes(content), dict(response.headers), url
+        except urllib3.exceptions.HTTPError as exc:
+            raise ExtractionError("document transport failed") from exc
+        finally:
+            if response is not None:
+                response.close()
+            pool.close()
+    raise ExtractionError("document redirect limit exceeded")
+
+
 def fetch_document(
     source: SourceRecord,
     *,
@@ -45,7 +117,6 @@ def fetch_document(
     excluded_domains: Optional[list[str]] = None,
     timeout_seconds: float = 20.0,
     max_bytes: int = 10_000_000,
-    session=requests,
 ) -> ExtractedDocument:
     """Fetch an approved HTML/PDF URL and return normalized text."""
 
@@ -54,16 +125,10 @@ def fetch_document(
     url = str(source.metadata.get("pdf_url") or source.url)
     if not _host_allowed(url, approved_domains, excluded_domains):
         raise ExtractionError("document URL is outside the approved source-domain policy")
-    response = session.get(
-        url,
-        timeout=timeout_seconds,
-        headers={"User-Agent": "research-system-local/0.1"},
-    )
-    response.raise_for_status()
-    content = response.content
-    if len(content) > max_bytes:
-        raise ExtractionError("document exceeds the configured maximum size")
-    media_type = response.headers.get("Content-Type", "").split(";", 1)[0].casefold()
+    if timeout_seconds <= 0 or max_bytes <= 0:
+        raise ValueError("download limits must be positive")
+    content, headers, url = _download(url, approved_domains, excluded_domains, timeout_seconds, max_bytes)
+    media_type = headers.get("Content-Type", "").split(";", 1)[0].casefold()
     is_pdf = media_type == "application/pdf" or url.casefold().split("?", 1)[0].endswith(".pdf")
     if is_pdf:
         text = _extract_pdf(content)
@@ -99,7 +164,8 @@ def chunk_text(text: str, *, max_chars: int = 2000, overlap_chars: int = 200) ->
         candidate = f"{current}\n\n{paragraph}".strip()
         if current and len(candidate) > max_chars:
             chunks.append(current)
-            current = f"{current[-overlap_chars:]}\n\n{paragraph}".strip() if overlap_chars else paragraph
+            overlap = min(overlap_chars, max(0, max_chars - len(paragraph) - 2))
+            current = f"{current[-overlap:]}\n\n{paragraph}".strip() if overlap else paragraph
         else:
             current = candidate
     if current:

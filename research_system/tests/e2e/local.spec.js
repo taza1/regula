@@ -10,7 +10,7 @@ test("Swagger renders the updated local API", async ({ page }) => {
   await expect(page.getByText("/api/v1/ai/status", { exact: true })).toBeVisible();
 });
 
-test("project, run, planner, and confirmation work end to end", async ({ request }) => {
+test("project, run, evidence, and draft work end to end", async ({ request }) => {
   const tenantId = `TEN-PW-${Date.now()}`;
   const headers = { "X-Tenant-Id": tenantId, "X-User-Id": "playwright-user" };
   const created = await request.post(
@@ -52,12 +52,30 @@ test("project, run, planner, and confirmation work end to end", async ({ request
   );
   expect(confirmResponse.ok()).toBeTruthy();
 
+  const execution = await request.post(
+    `${baseURL}/api/v1/projects/${projectId}/runs/${runId}/execute-local`,
+    { headers },
+  );
+  expect(execution.ok()).toBeTruthy();
+  const executionBody = await execution.json();
+  expect(executionBody.evidence_count).toBeGreaterThan(0);
+  expect(executionBody.provider_outcomes[0].status).toBe("success");
+
+  const synthesis = await request.post(
+    `${baseURL}/api/v1/projects/${projectId}/runs/${runId}/synthesize-local`,
+    { headers },
+  );
+  expect(synthesis.ok()).toBeTruthy();
+  const synthesisBody = await synthesis.json();
+  expect(synthesisBody.claims.length).toBeGreaterThan(0);
+  expect(synthesisBody.draft.references.length).toBeGreaterThan(0);
+
   const retrieved = await request.get(
     `${baseURL}/api/v1/projects/${projectId}/runs/${runId}`,
     { headers },
   );
   expect(retrieved.ok()).toBeTruthy();
-  expect((await retrieved.json()).state).toBe("queued");
+  expect((await retrieved.json()).state).toBe("reviewing");
 });
 
 test("model-provider status is explicit", async ({ request }) => {

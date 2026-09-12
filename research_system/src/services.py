@@ -26,6 +26,8 @@ from src.source_connectors import (
     CompositeScholarlyConnector,
     SourceConnector,
     SourceRecord,
+    SourceResults,
+    search_with_outcome,
 )
 from src.evidence_extraction import chunk_text, fetch_document
 
@@ -35,6 +37,7 @@ class DiscoveryIngestionResult(TypedDict):
 
     sources: List[SourceRecord]
     evidence: List[EvidenceRecord]
+    provider_outcomes: List[Dict[str, Any]]
 
 
 class SynthesisResult(TypedDict):
@@ -709,7 +712,7 @@ class EvidenceService:
         total_limit = max(
             1, min(int(requested_limit), configured_limit, 1000)
         )
-        sources: List[SourceRecord] = []
+        sources = SourceResults()
         seen_ids: set[str] = set()
         seen_dois: set[str] = set()
         seen_arxiv_ids: set[str] = set()
@@ -727,12 +730,13 @@ class EvidenceService:
             remaining = total_limit - len(sources)
             if remaining <= 0:
                 break
-            discovered = await self.connector.search(
+            discovered = await search_with_outcome(self.connector,
                 query,
                 limit=remaining,
                 date_range_start=run.research_request.date_range_start,
                 date_range_end=run.research_request.date_range_end,
             )
+            sources.outcomes.extend(discovered.outcomes)
             for source in discovered:
                 if not source_passes_governance(
                     source,
@@ -999,7 +1003,8 @@ class EvidenceService:
         evidence = await self.ingest_sources(
             tenant_id, project_id, run_id, sources
         )
-        return {"sources": sources, "evidence": evidence}
+        return {"sources": sources, "evidence": evidence,
+                "provider_outcomes": getattr(sources, "outcomes", [])}
 
     async def discover_and_ingest_plan(
         self,
@@ -1013,7 +1018,7 @@ class EvidenceService:
 
         queries = plan.get("search_queries", [])
         if not isinstance(queries, list):
-            return {"sources": [], "evidence": []}
+            return {"sources": [], "evidence": [], "provider_outcomes": []}
         return await self.discover_and_ingest(
             tenant_id, project_id, run_id, queries, max_sources=max_sources
         )
