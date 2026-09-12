@@ -21,6 +21,7 @@ class LocalStateStore:
         self.database_path = Path(database_path).expanduser().resolve()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self.fts_enabled = False
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -43,6 +44,50 @@ class LocalStateStore:
                 )
                 """
             )
+            try:
+                existing_columns = [row[1] for row in connection.execute(
+                    "PRAGMA table_info(evidence_fts)"
+                ).fetchall()]
+                expected_columns = ["tenant_id", "project_id", "run_id", "evidence_id",
+                                    "source_use_decision", "eligibility_status", "title",
+                                    "passage", "authors", "url", "doi"]
+                if existing_columns and existing_columns != expected_columns:
+                    connection.execute("DROP TABLE evidence_fts")
+                connection.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
+                        tenant_id UNINDEXED, project_id UNINDEXED, run_id UNINDEXED,
+                        evidence_id UNINDEXED, source_use_decision UNINDEXED,
+                        eligibility_status UNINDEXED, title, passage, authors, url, doi,
+                        tokenize='unicode61'
+                    )
+                    """
+                )
+                self.fts_enabled = True
+                self._rebuild_evidence_fts(connection)
+            except sqlite3.OperationalError:
+                self.fts_enabled = False
+
+    @staticmethod
+    def _index_evidence(connection: sqlite3.Connection, payload: dict[str, Any]) -> None:
+        connection.execute(
+            "DELETE FROM evidence_fts WHERE tenant_id=? AND project_id=? AND evidence_id=?",
+            (payload["tenant_id"], payload["project_id"], payload["evidence_id"]),
+        )
+        connection.execute(
+            "INSERT INTO evidence_fts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (payload["tenant_id"], payload["project_id"], payload["run_id"],
+             payload["evidence_id"], payload.get("source_use_decision", "blocked"),
+             payload.get("eligibility_status", "ineligible"),
+             payload.get("title", ""), payload.get("passage", ""),
+             " ".join(payload.get("authors", [])), payload.get("url", ""), payload.get("doi") or ""),
+        )
+
+    def _rebuild_evidence_fts(self, connection: sqlite3.Connection) -> None:
+        connection.execute("DELETE FROM evidence_fts")
+        rows = connection.execute("SELECT payload FROM entities WHERE kind='evidence'").fetchall()
+        for row in rows:
+            self._index_evidence(connection, json.loads(row["payload"]))
 
     def put(
         self,
@@ -86,6 +131,8 @@ class LocalStateStore:
                 """,
                 (kind, tenant_id, project_id, entity_id, serialized),
             )
+            if kind == "evidence" and self.fts_enabled:
+                self._index_evidence(connection, payload)
 
     def get(
         self,
@@ -122,4 +169,34 @@ class LocalStateStore:
                 """,
                 (kind, tenant_id, project_id, limit, offset),
             ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
+    def search_evidence(
+        self, tenant_id: str, project_id: str, run_id: str, terms: list[str], limit: int
+    ) -> Optional[list[dict[str, Any]]]:
+        """Return BM25-ranked evidence, or None when SQLite lacks FTS5."""
+        if not self.fts_enabled or not terms:
+            return None
+        match_query = " OR ".join(f'"{term}"' for term in terms)
+        with self._lock, self._connect() as connection:
+            try:
+                rows = connection.execute(
+                    """
+                    SELECT entities.payload
+                    FROM evidence_fts
+                    JOIN entities ON entities.kind='evidence'
+                      AND entities.tenant_id=evidence_fts.tenant_id
+                      AND entities.project_id=evidence_fts.project_id
+                      AND entities.entity_id=evidence_fts.evidence_id
+                    WHERE evidence_fts MATCH ? AND evidence_fts.tenant_id=?
+                      AND evidence_fts.project_id=? AND evidence_fts.run_id=?
+                      AND evidence_fts.source_use_decision='allowed'
+                      AND evidence_fts.eligibility_status='eligible'
+                    ORDER BY bm25(evidence_fts, 0, 0, 0, 0, 0, 0, 5.0, 2.0, 1.0, 0.2, 1.0)
+                    LIMIT ?
+                    """,
+                    (match_query, tenant_id, project_id, run_id, limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return None
         return [json.loads(row["payload"]) for row in rows]

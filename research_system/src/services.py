@@ -1040,11 +1040,22 @@ class EvidenceService:
             for term in re.findall(r"[a-z0-9]{2,}", query.casefold())
             if term.strip()
         ]
+        bounded_limit = max(1, min(limit, 100))
+        fts_candidates = self.store.search_evidence(
+            tenant_id, project_id, run_id, terms, bounded_limit
+        )
+        if fts_candidates is not None:
+            return [
+                evidence
+                for payload in fts_candidates
+                if (evidence := EvidenceRecord.model_validate(payload)).source_use_decision.value == "allowed"
+            ]
         candidates = self.store.list("evidence", tenant_id, project_id, limit=1000)
         ranked: list[tuple[int, EvidenceRecord]] = []
         for payload in candidates:
             evidence = EvidenceRecord.model_validate(payload)
-            if evidence.run_id != run_id or evidence.source_use_decision.value != "allowed":
+            if (evidence.run_id != run_id or evidence.source_use_decision.value != "allowed"
+                    or evidence.eligibility_status.value != "eligible"):
                 continue
             haystack_text = " ".join(
                 [evidence.title, evidence.passage, evidence.url, evidence.doi or ""]
@@ -1055,7 +1066,7 @@ class EvidenceService:
             if score:
                 ranked.append((score, evidence))
         ranked.sort(key=lambda item: (-item[0], item[1].created_at))
-        return [evidence for _, evidence in ranked[: max(1, min(limit, 100))]]
+        return [evidence for _, evidence in ranked[:bounded_limit]]
     
     async def get_evidence(
         self,

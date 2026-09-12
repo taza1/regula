@@ -35,7 +35,7 @@
 
 ## Search and research generation
 
-- [ ] Add SQLite full-text search
+- [x] Add SQLite FTS5 search with BM25 ranking and scoped eligibility filters
 - [ ] Add embeddings and vector retrieval
 - [ ] Add Azure AI Search adapter
 - [ ] Implement background run workers

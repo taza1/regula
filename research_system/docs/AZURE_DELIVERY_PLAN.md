@@ -20,7 +20,7 @@ The repo is no longer just the original scaffold. The research branch now includ
 - Allowlisted HTML/PDF retrieval with redirect and resolved-address checks, bounded streaming, text extraction, and chunking.
 - Insert-only local source snapshots that reject conflicting writes.
 - Tenant/project/run-scoped evidence storage.
-- Ranked local keyword evidence search.
+- SQLite FTS5 evidence search with BM25 ranking and tenant/project/run/eligibility filters.
 - Python tests passing on 2026-09-12: `41 passed, 1 warning`.
 - A GitHub Actions workflow defines deterministic Python and Playwright checks; its first hosted run remains pending push.
 
@@ -41,7 +41,7 @@ The local app is useful for development, but it is not yet an end-to-end researc
 - Only the planner is wired as an agent; source search, research synthesis, fact check, citation validation, critical review, safety, and evaluator agents are not implemented.
 - `execute-local` can use deterministic local fixtures or scholarly metadata discovery. Full-document ingestion is an explicit service path and is not yet wired into the default API execution flow.
 - Evidence storage is SQLite JSON records, not immutable Blob originals plus Cosmos metadata and Azure AI Search indexes.
-- Search is local term counting over stored evidence, not hybrid keyword/vector/semantic retrieval.
+- Search has scoped local FTS5/BM25 retrieval; embeddings, semantic retrieval, Azure AI Search, and measured precision/recall are not implemented.
 - Cross-provider publication deduplication is implemented, but evidence independence still does not identify shared studies or datasets reliably enough for publication gates.
 - Release is intentionally blocked at the API with `501`. Lower-level release service stubs still contain placeholder Blob URLs and must not be exposed.
 - State updates are unconditional local upserts, not ETag/epoch-guarded transitions.
@@ -88,7 +88,7 @@ Required work:
 - Harden the OpenAlex connector, then add Crossref and arXiv connectors with rate limits, retries, provenance, and source-use metadata.
 - Store source originals or source snapshots immutably, even in local dev.
 - Add passage records with section/offset/page fields where available.
-- Add local full-text search before moving retrieval to Azure AI Search.
+- Establish retrieval evaluation fixtures, then add embeddings and move retrieval to Azure AI Search.
 - Implement a synthesis pass that creates a draft plus a material claim ledger.
 - Add deterministic citation validation over claim-to-passage references.
 - Preserve `/release` as `501` until approval, manifest, artifact verification, and conditional commit are implemented.

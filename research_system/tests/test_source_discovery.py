@@ -75,6 +75,10 @@ async def test_planner_queries_become_scoped_evidence(tmp_path):
     assert await evidence_service.search_evidence(
         "TEN-1", "PRJ-1", run.run_id, "intervention"
     )
+    assert store.fts_enabled is True
+    assert await evidence_service.search_evidence(
+        "TEN-OTHER", "PRJ-1", run.run_id, "intervention"
+    ) == []
 
 
 @pytest.mark.asyncio

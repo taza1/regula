@@ -90,7 +90,7 @@ These are the first implementation tickets I would open:
 | P0 | Add run epochs/stale worker protection for background execution. | TASK-002, TASK-017 | Retried or late worker results are rejected after cancellation, retry, policy change, or successor run creation. |
 | Done | Harden OpenAlex connector and add Crossref/arXiv behind the same source interface. | TASK-007 | Local discovery returns normalized metadata with retries, attribution, and visible provider outcomes. |
 | Done | Persist immutable local source snapshots and abstract-level passage records. | TASK-010, TASK-011 | Snapshot conflicts are rejected and evidence contains source and passage references. Precise PDF page/section coordinates remain open under TASK-011. |
-| P1 | Add local FTS retrieval, then Azure AI Search schema. | TASK-012, TASK-013 | Search returns scoped, ranked evidence and fixture precision/recall thresholds pass. |
+| In progress | Add local FTS retrieval, then Azure AI Search schema. | TASK-012, TASK-013 | Local FTS5/BM25 and scope/eligibility filtering are implemented; embeddings, Azure indexes, and precision/recall evaluation remain. |
 | Done | Implement deterministic local draft skeleton plus claim ledger. | TASK-016, TASK-030 | Drafts cite eligible evidence and claims remain pending review. |
 | P1 | Implement reviewed LLM synthesis with insufficiency/contradiction handling. | TASK-016, TASK-030 | Unsupported claims are tracked as insufficient evidence and cannot enter a release-ready draft. |
 | P1 | Implement citation validator and fact-checker. | TASK-018, TASK-019 | Bad citation and unsupported-claim fixtures block release readiness. |
