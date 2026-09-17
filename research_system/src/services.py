@@ -293,6 +293,7 @@ class ResearchRunService:
         },
         RunState.SYNTHESIZING: {
             RunState.REVIEWING,
+            RunState.INSUFFICIENT_EVIDENCE,
             RunState.CANCELLED,
             RunState.FAILED,
         },
@@ -382,10 +383,12 @@ class ResearchRunService:
             return False
         if new_state not in self._allowed_transitions.get(run.state, set()):
             return False
+        old_state = run.state.value
         run.state = new_state
         run.updated_time = datetime.utcnow()
-        self.store.put("run", tenant_id, project_id, run_id, run.model_dump(mode="json"))
-        return True
+        return self.store.compare_run(
+            tenant_id, project_id, run_id, old_state, run.model_dump(mode="json")
+        )
 
     async def save_research_plan(
         self,
@@ -437,8 +440,8 @@ class ResearchRunService:
         limit: int = 100,
     ) -> List[ClaimRecord]:
         """List claims belonging to a run."""
-        payloads = self.store.list(
-            "claim", tenant_id, project_id, limit=max(1, min(limit, 1000))
+        payloads = self.store.scoped_list(
+            "claim", tenant_id, project_id, run_id, limit=max(1, min(limit, 1000))
         )
         return [
             claim
@@ -758,6 +761,9 @@ class EvidenceService:
                 date_range_start=run.research_request.date_range_start,
                 date_range_end=run.research_request.date_range_end,
             )
+            current = await ResearchRunService(self.store).get_run(tenant_id, project_id, run_id)
+            if current and current.state == RunState.CANCELLED:
+                raise asyncio.CancelledError()
             sources.outcomes.extend(discovered.outcomes)
             for source in discovered:
                 if not source_passes_governance(
@@ -816,8 +822,8 @@ class EvidenceService:
     ) -> List[SourceRecord]:
         """List only source records belonging to the requested run."""
 
-        payloads = self.store.list(
-            "source", tenant_id, project_id, limit=max(1, min(limit, 1000))
+        payloads = self.store.scoped_list(
+            "source", tenant_id, project_id, run_id, limit=max(1, min(limit, 1000))
         )
         return [
             source
@@ -863,7 +869,10 @@ class EvidenceService:
                 if isinstance(source.metadata.get("canonical_source_id"), str)
                 else canonical_source_id(source)
             )
+            section = "full_text" if source.metadata.get("extraction_media_type") else "abstract"
             source_identity = f"{tenant_id}|{project_id}|{run_id}|{canonical_id}|{content_hash}"
+            if section == "full_text":
+                source_identity += "|full_text"
             snapshot_id = "SSN-" + _sha256_hex(source_identity)[:16].upper()
             passage_id = "PAS-" + _sha256_hex(
                 f"{snapshot_id}|abstract|0|{content_hash}"
@@ -898,7 +907,7 @@ class EvidenceService:
                 source_id=source.source_id,
                 source_snapshot_id=snapshot_id,
                 canonical_source_id=canonical_id,
-                section="abstract",
+                section=section,
                 offset_start=0,
                 offset_end=len(passage),
                 text=passage,
@@ -921,7 +930,7 @@ class EvidenceService:
                 published_at=source.published_at,
                 retrieved_at=retrieved_at,
                 peer_review_status=source.peer_review_status,
-                section="abstract",
+                section=section,
                 passage=passage,
                 content_hash=f"sha256:{content_hash}",
                 license=source.license,
@@ -993,6 +1002,9 @@ class EvidenceService:
                 timeout_seconds=config.openalex_timeout_seconds,
                 max_bytes=max_bytes,
             )
+            current = await ResearchRunService(self.store).get_run(tenant_id, project_id, run_id)
+            if current and current.state == RunState.CANCELLED:
+                raise asyncio.CancelledError()
             for index, passage in enumerate(
                 chunk_text(document.text, max_chars=max_chars, overlap_chars=overlap_chars)
             ):
@@ -1145,14 +1157,15 @@ class SynthesisService:
         run = await run_service.get_run(tenant_id, project_id, run_id)
         if not run:
             return None
-        payloads = self.store.list(
-            "evidence", tenant_id, project_id, limit=max(1, min(limit, 25))
+        payloads = self.store.scoped_list(
+            "evidence", tenant_id, project_id, run_id, limit=1000
         )
         evidence_records = [
             evidence
             for payload in payloads
             if (evidence := EvidenceRecord.model_validate(payload)).run_id == run_id
             and evidence.source_use_decision.value == "allowed"
+            and evidence.eligibility_status.value == "eligible"
         ][: max(1, min(limit, 25))]
         if not evidence_records:
             return None

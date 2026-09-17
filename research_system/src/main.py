@@ -1,10 +1,14 @@
 """FastAPI application for the research system."""
 
 from typing import Optional, List
+import asyncio
+from contextlib import suppress
+from pathlib import Path
 from datetime import datetime
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 
@@ -21,6 +25,7 @@ from src.services import (
 from src.agents import AgentMessage, AgentOrchestrator, AgentRole
 from src.local_store import LocalStateStore
 from src.model_client import ModelConnectionError, ResearchModelClient, create_model_client
+from src.execution import ExecutionQueue, LocalResearchWorker
 
 
 # ============================================================================
@@ -38,6 +43,7 @@ synthesis_service: Optional[SynthesisService] = None
 citation_validation_service: Optional[CitationValidationService] = None
 orchestrator: Optional[AgentOrchestrator] = None
 model_client: Optional[ResearchModelClient] = None
+execution_queue: Optional[ExecutionQueue] = None
 
 
 @asynccontextmanager
@@ -45,7 +51,7 @@ async def lifespan(app: FastAPI):
     """Application lifecycle management."""
     global tenant_service, project_service, run_service
     global approval_service, release_service, evidence_service, synthesis_service, citation_validation_service, orchestrator
-    global model_client
+    global model_client, execution_queue
     
     # Startup
     store = LocalStateStore(api_config.local_db_path)
@@ -59,10 +65,18 @@ async def lifespan(app: FastAPI):
     citation_validation_service = CitationValidationService(store)
     model_client = create_model_client(get_model_config())
     orchestrator = AgentOrchestrator(model_client)
+    execution_queue = ExecutionQueue(store)
+    worker = LocalResearchWorker(execution_queue, evidence_service)
+    worker_task = asyncio.create_task(worker.serve())
     
     print("Research system services initialized")
     
-    yield
+    try:
+        yield
+    finally:
+        worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker_task
     
     # Shutdown
     print("Research system shutdown")
@@ -90,6 +104,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+dashboard_directory = Path(__file__).parent / "dashboard"
+app.mount("/dashboard-assets", StaticFiles(directory=dashboard_directory), name="dashboard-assets")
+
+
+@app.get("/dashboard", include_in_schema=False)
+async def dashboard():
+    return FileResponse(dashboard_directory / "index.html")
 
 
 # ============================================================================
@@ -590,6 +612,9 @@ async def synthesize_local_research(
             auth.user_id,
             [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN],
         )
+        job = execution_queue.get(scoped_tenant_id, project_id, run_id)
+        if job and job['status'] in {'queued', 'running'}:
+            raise HTTPException(status_code=409, detail="The background worker owns this run")
         run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -958,5 +983,64 @@ async def root():
     return {
         "service": "Multi-Agent Research System",
         "api_version": api_config.api_version,
-        "docs": "/docs" if api_config.enable_docs else None
+        "docs": "/docs" if api_config.enable_docs else None,
+        "dashboard": "/dashboard",
+    }
+
+
+class ExecuteResearchRequest(BaseModel):
+    full_text: bool = False
+
+
+@app.get("/api/v1/projects")
+async def list_projects(auth: AuthContext = Depends(get_auth_context),
+                        limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0)):
+    # Membership filtering precedes pagination; never expose another user's projects.
+    import json
+    with project_service.store._connect() as db:
+        rows = db.execute(
+            "SELECT payload FROM entities WHERE kind='project' AND tenant_id=? "
+            "AND EXISTS (SELECT 1 FROM json_each(json_extract(payload, '$.members')) "
+            "WHERE key=? AND json_array_length(value)>0) "
+            "ORDER BY updated_at DESC, entity_id LIMIT ? OFFSET ?",
+            (auth.tenant_id, auth.user_id, limit, offset),
+        ).fetchall()
+    return {"projects": [json.loads(row['payload']) for row in rows]}
+
+
+@app.get("/api/v1/projects/{project_id}/runs")
+async def list_runs(project_id: str, auth: AuthContext = Depends(get_auth_context),
+                    limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0)):
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id, list(ProjectMembership))
+    return {"runs": run_service.store.scoped_list("run", auth.tenant_id, project_id, limit=limit, offset=offset)}
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/execute", status_code=202)
+async def enqueue_research(project_id: str, run_id: str, request: ExecuteResearchRequest,
+                           auth: AuthContext = Depends(get_auth_context)):
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id,
+                                [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN])
+    if not await run_service.get_run(auth.tenant_id, project_id, run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        return execution_queue.enqueue(auth.tenant_id, project_id, run_id, request.full_text)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/api/v1/projects/{project_id}/runs/{run_id}/results")
+async def research_results(project_id: str, run_id: str,
+                            auth: AuthContext = Depends(get_auth_context),
+                            limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0)):
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id, list(ProjectMembership))
+    run = await run_service.get_run(auth.tenant_id, project_id, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    store = run_service.store
+    return {
+        "run": run.model_dump(mode="json"),
+        "execution": execution_queue.get(auth.tenant_id, project_id, run_id),
+        "draft": store.get("draft", auth.tenant_id, project_id, run_id),
+        "evidence": store.scoped_list("evidence", auth.tenant_id, project_id, run_id, limit=limit, offset=offset),
+        "findings": store.scoped_list("finding", auth.tenant_id, project_id, run_id, limit=1000),
     }

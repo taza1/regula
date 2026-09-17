@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Regula · Research workspace</title>
+  <meta name="description" content="Plan research, follow collection, and inspect the evidence behind a draft.">
+  <link rel="stylesheet" href="/dashboard-assets/style.css">
+  <script src="/dashboard-assets/app.js" defer></script>
+</head>
+<body>
+<aside>
+  <a class="brand" href="/dashboard"><span class="mark">R</span> regula <span class="edition">RESEARCH</span></a>
+  <label for="project">PROJECT</label>
+  <select id="project" aria-label="Project"><option value="">Select a project</option></select>
+  <button id="new-project" class="quiet">+ New project</button>
+  <div class="aside-heading">RESEARCH RUNS <button id="refresh" class="icon" aria-label="Refresh projects and runs">↻</button></div>
+  <nav id="runs" aria-label="Research runs"><p class="muted">Create a project to begin.</p></nav>
+  <div class="aside-bottom"><span class="dot"></span> Local workspace <a href="/docs" target="_blank" rel="noopener">API ↗</a></div>
+  <details id="identity"><summary>Workspace identity</summary><p class="muted">Development identity only. No sign-in is configured.</p>
+    <form id="identity-form"><label>Tenant<input id="tenant" required maxlength="100"></label><label>User<input id="user" required maxlength="100"></label><button class="quiet">Apply identity</button></form>
+  </details>
+</aside>
+<main>
+  <header><div><p class="eyebrow">RESEARCH WORKSPACE</p><h1 id="project-title">Your research, with evidence.</h1></div><button id="new-run" disabled>+ New research</button></header>
+  <div id="notice" role="status" aria-live="polite" hidden></div>
+  <div class="provider-bar"><span id="provider">Connecting…</span><span>Drafts require independent review</span></div>
+  <section id="empty" class="empty"><div class="empty-mark">↗</div><h2>Start with a question.</h2><p>Create a project, then plan a research run.<br>Sources, passages, and a cited draft will stay together here.</p><button id="empty-action">Create project</button></section>
+  <article id="workspace" hidden>
+    <div class="run-heading"><div><p class="eyebrow" id="run-id"></p><h2 id="run-title"></h2><p id="question"></p></div><span id="state" class="badge"></span></div>
+    <ol id="stages" class="stages" aria-label="Research progress"></ol>
+    <div class="summary-row"><p id="job-message" aria-live="polite"></p><button id="cancel" class="quiet danger" hidden>Cancel run</button></div>
+    <section id="plan-panel" class="panel"><div class="section-heading"><h3>Research plan</h3><button id="plan-button">Generate plan</button></div><p id="scope"></p><div id="plan-content"></div>
+      <div id="execute-options" hidden><label class="check"><input type="checkbox" id="full-text"> Collect full PDF / HTML documents from approved domains</label><p class="muted">Unavailable documents are reported; available abstracts remain usable.</p><button id="execute-button">Confirm scope & start research</button></div>
+    </section>
+    <div id="metrics" class="metrics"></div>
+    <div class="results-grid">
+      <section class="panel"><div class="section-heading"><h3>Evidence library</h3><span id="evidence-count" class="muted"></span></div>
+        <form id="search-form" class="search"><input id="search" type="search" aria-label="Search evidence" placeholder="Search passages, titles, authors…"><button class="quiet">Search</button><button id="clear-search" type="button" class="quiet">Clear</button></form>
+        <div id="evidence"><p class="muted">Collected passages will appear here.</p></div><button id="more-evidence" class="quiet" hidden>Load more passages</button>
+      </section>
+      <section class="panel draft-panel"><div class="section-heading"><h3>Cited draft</h3><span class="badge">Unreviewed</span></div><div id="draft"><p class="muted">The draft appears after evidence collection.</p></div></section>
+    </div>
+    <details class="panel"><summary>Collection details & citation findings</summary><div id="outcomes"></div></details>
+    <button id="retry" class="quiet" hidden>Start a new run with this question</button>
+  </article>
+  <footer>REGULA <span>Evidence first. Review before release.</span></footer>
+</main>
+<dialog id="project-dialog"><form id="project-form"><div class="section-heading"><h2>New project</h2><button type="button" data-close="project-dialog" class="quiet" aria-label="Close">×</button></div><label>Project name<input name="name" required maxlength="120" placeholder="e.g. Evidence quality"></label><label>Description<textarea name="description" rows="3"></textarea></label><p class="form-error" role="alert"></p><button>Create project</button></form></dialog>
+<dialog id="run-dialog"><form id="run-form"><div class="section-heading"><h2>New research</h2><button type="button" data-close="run-dialog" class="quiet" aria-label="Close">×</button></div>
+  <label>Title<input name="title" required maxlength="160" placeholder="A short name for this research"></label>
+  <label>Research question<textarea name="primary_question" required rows="2" placeholder="What would you like to understand?"></textarea></label>
+  <label>Scope<textarea name="scope_description" required rows="2" placeholder="Population, geography, source types, or other boundaries"></textarea></label>
+  <div class="form-grid"><label>From date<input name="date_range_start" type="date"></label><label>Through date<input name="date_range_end" type="date"></label></div>
+  <label>Approved source domains<input name="approved_source_domains" placeholder="e.g. arxiv.org, nature.com"><small>Comma separated. Required for full documents.</small></label>
+  <label>Excluded domains<input name="excluded_domains" placeholder="Optional, comma separated"></label>
+  <label>Maximum sources<input name="max_sources" type="number" min="1" max="100" value="20" required></label>
+  <p class="form-error" role="alert"></p><button>Create research run</button>
+</form></dialog>
+</body></html>
