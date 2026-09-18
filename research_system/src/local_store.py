@@ -200,3 +200,31 @@ class LocalStateStore:
             except sqlite3.OperationalError:
                 return None
         return [json.loads(row["payload"]) for row in rows]
+
+    def scoped_list(self, kind, tenant_id, project_id=None, run_id=None, limit=100, offset=0):
+        """Filter before pagination so other runs cannot hide matching records."""
+        clauses, values = ["kind=?", "tenant_id=?"], [kind, tenant_id]
+        if project_id is not None:
+            clauses.append("project_id=?")
+            values.append(project_id)
+        if run_id is not None:
+            clauses.append("json_extract(payload, '$.run_id')=?")
+            values.append(run_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM entities WHERE " + " AND ".join(clauses)
+                + " ORDER BY updated_at DESC, entity_id LIMIT ? OFFSET ?",
+                (*values, limit, offset),
+            ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
+    def compare_run(self, tenant_id, project_id, run_id, old_state, payload):
+        with self._connect() as connection:
+            return connection.execute(
+                "UPDATE entities SET payload=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE kind='run' AND tenant_id=? AND project_id=? AND entity_id=? "
+                "AND json_extract(payload, '$.state')=? "
+                "AND json_extract(payload, '$.report_revision')=?",
+                (json.dumps(payload), tenant_id, project_id, run_id, old_state,
+                 payload['report_revision']),
+            ).rowcount == 1

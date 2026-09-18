@@ -38,7 +38,8 @@
 - [x] Add SQLite FTS5 search with BM25 ranking and scoped eligibility filters
 - [ ] Add embeddings and vector retrieval
 - [ ] Add Azure AI Search adapter
-- [ ] Implement background run workers
+- [x] Implement background run workers
+- [x] Add research workspace dashboard and durable execution queue
 - [x] Generate deterministic local claim ledger and draft skeleton
 - [ ] Generate reviewed evidence-backed reports
 - [ ] Add contradictory-evidence searches
