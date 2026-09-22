@@ -1,6 +1,6 @@
 # Research review and release status
 
-Verified locally: 2026-09-21. Branch: `feature/research-review-release`, based on merged master `b64aae9`.
+Verified locally: 2026-09-22. Branch: `feature/research-review-release`, based on merged master `b64aae9`.
 
 ## Implemented
 
@@ -12,10 +12,13 @@ Verified locally: 2026-09-21. Branch: `feature/research-review-release`, based o
 - `AUTH_MODE=entra` validates signed delegated access tokens against a configured tenant, issuer, audience, expiration and API scope. Local development headers are ignored in this mode. Browser SSO integration remains pending.
 - `MODEL_PROVIDER=foundry` invokes a deployed hosted agent through its dedicated endpoint. The hosted role executor and whitelist-only packaging/deployment scripts are supplied. They do not expose publication tools.
 - `infra/main.bicep` defines Foundry/project, Cosmos/database/container, private Blob containers, Search, Service Bus queues, Key Vault, monitoring, identity, VNet and private endpoints. Local Bicep compilation and Azure Resource Manager validation succeeded. No deployment was performed.
+- Source discovery now supports a pure `scholarly` connector for OpenAlex, Crossref and arXiv without local synthetic fallback. Missing abstracts remain empty instead of becoming placeholder evidence, Crossref type is not treated as peer-review proof, and explicit date windows keep relevance-biased ranking.
 
 ## Verification
 
-The baseline had 45 passing Python tests. The full suite passed with 57 tests after review/release implementation. An additional end-to-end API test passed for review, approval, publisher authorization, artifact read and tenant isolation (13 focused review/publication tests).
+The baseline had 45 passing Python tests. The full suite passed with 62 tests after review/release and source-hardening implementation. An additional end-to-end API test passed for review, approval, publisher authorization, artifact read and tenant isolation.
+
+A live local dashboard run was exercised with Playwright against `MODEL_PROVIDER=azure`, `SOURCE_CONNECTOR=scholarly`, and `gpt-5.6-sol`. The run produced real Crossref/OpenAlex records and reached `adjudication_required`, correctly blocking release because the evidence was abstract-only, temporally concentrated, and source-fit limited.
 
 The hosted SDK deployment definition can be constructed locally, and the packaged entrypoint imports with its optional dependencies. Live Foundry execution has not been tested. Docker Desktop's engine was unavailable. SDK instrumentation required disabling incompatible automatic OpenAI tracing; hosted telemetry is explicitly disabled until redaction is verified.
 
