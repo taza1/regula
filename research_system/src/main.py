@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 
-from src.config import get_api_config, get_azure_config, get_model_config
+from src.config import get_api_config, get_azure_config, get_model_config, get_research_config
 from src.models import (
     ProjectMembership, RunState, ResearchRequest, RunRecord, ProjectModel,
     EvidenceRecord, ClaimRecord, ReviewFinding
@@ -26,6 +26,8 @@ from src.agents import AgentMessage, AgentOrchestrator, AgentRole
 from src.local_store import LocalStateStore
 from src.model_client import ModelConnectionError, ResearchModelClient, create_model_client
 from src.execution import ExecutionQueue, LocalResearchWorker
+from src.review_pipeline import ReviewPipeline, digest
+from src.publication import PublicationService
 
 
 # ============================================================================
@@ -54,6 +56,11 @@ async def lifespan(app: FastAPI):
     global model_client, execution_queue
     
     # Startup
+    if api_config.auth_mode == 'entra':
+        import uuid
+        uuid.UUID(api_config.entra_tenant_id)
+        if not api_config.entra_audience:
+            raise ValueError('ENTRA_AUDIENCE is required in Entra mode')
     store = LocalStateStore(api_config.local_db_path)
     tenant_service = TenantService(store)
     project_service = ProjectService(store)
@@ -66,7 +73,7 @@ async def lifespan(app: FastAPI):
     model_client = create_model_client(get_model_config())
     orchestrator = AgentOrchestrator(model_client)
     execution_queue = ExecutionQueue(store)
-    worker = LocalResearchWorker(execution_queue, evidence_service)
+    worker = LocalResearchWorker(execution_queue, evidence_service, model_client)
     worker_task = asyncio.create_task(worker.serve())
     
     print("Research system services initialized")
@@ -155,6 +162,10 @@ class ReleaseReportRequest(BaseModel):
     approval_id: str
 
 
+class MembershipRequest(BaseModel):
+    roles: List[ProjectMembership] = Field(max_length=4)
+
+
 class WithdrawReleaseRequest(BaseModel):
     """Request to withdraw a release."""
     reason: str
@@ -180,11 +191,18 @@ class AuthContext(BaseModel):
 
 
 async def get_auth_context(
-    x_tenant_id: str = Header(..., alias="X-Tenant-Id"),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-Id"),
     x_user_id: str = Header("local-user", alias="X-User-Id"),
+    authorization: Optional[str] = Header(None),
 ) -> AuthContext:
     """Read the local caller identity from headers instead of query strings."""
 
+    if api_config.auth_mode == 'entra':
+        from src.auth import validate_entra
+        tenant, user = await validate_entra(authorization, api_config)
+        return AuthContext(tenant_id=tenant, user_id=user)
+    if x_tenant_id is None:
+        raise HTTPException(status_code=422, detail="X-Tenant-Id is required in local mode")
     tenant = x_tenant_id.strip()
     user = x_user_id.strip()
     if not tenant or not user:
@@ -240,6 +258,7 @@ async def health_check():
         "version": api_config.api_version,
         "storage": "sqlite-local",
         "model_provider": get_model_config().model_provider,
+        "source_connector": get_research_config().source_connector,
     }
 
 
@@ -255,6 +274,7 @@ async def system_info():
             "embedding": get_model_config().embedding_model,
         },
         "model_provider": model_client.status() if model_client else None,
+        "source_connector": get_research_config().source_connector,
     }
 
 
@@ -333,6 +353,25 @@ async def get_project(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/v1/projects/{project_id}/members/{user_id}")
+async def set_project_membership(project_id: str, user_id: str, request: MembershipRequest,
+                                  auth: AuthContext = Depends(get_auth_context)):
+    from src.review_pipeline import read_entity, write_entity
+    key = (auth.tenant_id, project_id)
+    with project_service.store._connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        project = read_entity(db, 'project', key, project_id)
+        if not project or 'admin' not in project.get('members', {}).get(auth.user_id, []):
+            raise HTTPException(status_code=403, detail='Project admin required')
+        members = project['members']
+        members[user_id] = sorted(set(role.value for role in request.roles))
+        if not any('admin' in roles for roles in members.values()):
+            raise HTTPException(status_code=409, detail='A project must retain an admin')
+        write_entity(db, 'project', key, project_id, project)
+        PublicationService._audit(db, key, auth.user_id, 'membership_changed', user_id)
+    return {'user_id': user_id, 'roles': members[user_id]}
 
 
 # ============================================================================
@@ -760,7 +799,7 @@ async def request_approval(
             scoped_tenant_id,
             project_id,
             auth.user_id,
-            [ProjectMembership.PUBLISHER, ProjectMembership.ADMIN],
+            [ProjectMembership.REVIEWER, ProjectMembership.ADMIN],
         )
         run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
         if not run:
@@ -771,17 +810,19 @@ async def request_approval(
                 detail="Run is not awaiting approval; release remains blocked",
             )
 
-        approval = await approval_service.request_approval(
-            scoped_tenant_id, project_id, run_id,
-            report_revision=1,
-            approver_id=auth.user_id
-        )
+        if not api_config.enable_report_release:
+            raise HTTPException(status_code=501, detail="Report approval is disabled")
+        try:
+            approval = PublicationService(run_service.store).approve(
+                (scoped_tenant_id, project_id, run_id), auth.user_id, request.approval_rationale)
+        except (ValueError, PermissionError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         
         if not approval:
             raise HTTPException(status_code=409, detail="Failed to create approval")
         
         return {
-            "approval": approval.model_dump(mode='json'),
+            "approval": approval,
             "message": "Approval request created"
         }
     except HTTPException:
@@ -806,13 +847,14 @@ async def release_report(
         auth.user_id,
         [ProjectMembership.PUBLISHER, ProjectMembership.ADMIN],
     )
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "Internal release is not implemented. Artifact verification, "
-            "authenticated approval, and conditional commit are required."
-        ),
-    )
+    if not api_config.enable_report_release:
+        raise HTTPException(status_code=501, detail="Report release is disabled")
+    try:
+        return PublicationService(run_service.store).release(
+            (scoped_tenant_id, project_id, run_id), auth.user_id, request.approval_id)
+    except (ValueError, PermissionError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
 
 
 @app.post("/api/v1/releases/{release_id}/withdraw")
@@ -1041,6 +1083,41 @@ async def research_results(project_id: str, run_id: str,
         "run": run.model_dump(mode="json"),
         "execution": execution_queue.get(auth.tenant_id, project_id, run_id),
         "draft": store.get("draft", auth.tenant_id, project_id, run_id),
+        "model_review": store.get("model_review", auth.tenant_id, project_id, run_id),
+        "release_enabled": api_config.enable_report_release,
+        "approval": next(iter(store.scoped_list('approval', auth.tenant_id, project_id, run_id, limit=1)), None),
+        "release": store.get('release_by_run', auth.tenant_id, project_id, run_id),
         "evidence": store.scoped_list("evidence", auth.tenant_id, project_id, run_id, limit=limit, offset=offset),
         "findings": store.scoped_list("finding", auth.tenant_id, project_id, run_id, limit=1000),
     }
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/review")
+async def review_report(project_id: str, run_id: str, auth: AuthContext = Depends(get_auth_context)):
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id,
+                                [ProjectMembership.REVIEWER, ProjectMembership.ADMIN])
+    job = execution_queue.get(auth.tenant_id, project_id, run_id)
+    if job and job['status'] in {'queued', 'running'}:
+        raise HTTPException(status_code=409, detail="The background worker owns this run")
+    try:
+        return await ReviewPipeline(run_service.store, model_client).execute(auth.tenant_id, project_id, run_id)
+    except ModelConnectionError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/api/v1/projects/{project_id}/releases/{release_id}/{artifact_kind}")
+async def read_release_artifact(project_id: str, release_id: str, artifact_kind: str,
+                                 auth: AuthContext = Depends(get_auth_context)):
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id, list(ProjectMembership))
+    store = run_service.store
+    release = store.get('release', auth.tenant_id, project_id, release_id)
+    artifact = store.get('release_artifact', auth.tenant_id, project_id, release_id)
+    if not release or not artifact or artifact_kind not in {'report', 'manifest'}:
+        raise HTTPException(status_code=404, detail="Release artifact not found")
+    if release.get('is_withdrawn'):
+        raise HTTPException(status_code=410, detail="Release withdrawn")
+    if digest(artifact['bundle']) != artifact['bundle_digest']:
+        raise HTTPException(status_code=409, detail="Artifact integrity check failed")
+    return artifact['bundle']['draft'] if artifact_kind == 'report' else artifact

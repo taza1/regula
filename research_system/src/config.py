@@ -1,6 +1,6 @@
 """Configuration management for the research system."""
 
-from typing import Optional, List
+from typing import Optional, List, Literal
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
@@ -53,7 +53,9 @@ class ModelConfig(BaseSettings):
     )
 
     # Provider selection. "mock" is safe and deterministic for local startup.
-    model_provider: str = Field(default="mock", description="mock, local_proxy, or azure")
+    model_provider: str = Field(default="mock", description="mock, local_proxy, azure, or foundry")
+    foundry_project_endpoint: str = ''
+    foundry_agent_name: str = ''
     model_base_url: str = Field(
         default="http://127.0.0.1:8765/v1",
         description="OpenAI-compatible base URL for the local Azure bridge",
@@ -104,7 +106,7 @@ class ResearchConfig(BaseSettings):
     # Source discovery limits
     source_connector: str = Field(
         default="local",
-        description="Source connector: local, openalex, crossref, arxiv, scholarly_with_local_fallback, or openalex_with_local_fallback",
+        description="Source connector: local, openalex, crossref, arxiv, scholarly, scholarly_with_local_fallback, or openalex_with_local_fallback",
     )
     openalex_base_url: str = Field(
         default="https://api.openalex.org",
@@ -176,6 +178,12 @@ class APIConfig(BaseSettings):
         description="SQLite state path used by the local development adapter",
     )
     
+    auth_mode: Literal['local', 'entra'] = 'local'
+    entra_tenant_id: str = ''
+    entra_audience: str = ''
+    entra_scope: str = 'Research.Access'
+    enable_report_release: bool = Field(default=False, description="Explicitly enable approval and local report release")
+
     # CORS
     cors_origins: List[str] = Field(default=["http://localhost:3000"], description="CORS allowed origins")
     cors_credentials: bool = Field(default=True, description="Allow credentials in CORS")

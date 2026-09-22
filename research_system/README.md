@@ -1,5 +1,7 @@
 # Multi-Agent Research System
 
+For the latest implementation and production boundaries, see [Review and release status](docs/REVIEW_RELEASE_STATUS.md).
+
 ## Overview
 
 This is an early implementation of the multi-agent research plan. The local vertical slice persists projects and runs in SQLite, uses local auth headers for tenant/user scope, generates and stores a bounded research plan, requires scope confirmation before queueing, and can discover/search paper metadata through OpenAlex, Crossref, and arXiv. The planner can run deterministically offline or call an Azure model with Microsoft Entra authentication.
@@ -8,8 +10,9 @@ This is an early implementation of the multi-agent research plan. The local vert
 
 - Working: health/OpenAPI, local project and run persistence, local auth headers and project membership checks, planner agent, legal run-state checks, scope confirmation, OpenAlex/Crossref/arXiv paper discovery with cross-provider deduplication, source snapshots, passage records, local evidence ingestion/search, deterministic draft skeleton, claim ledger, provider status, and guarded 401/403/404/409/502 errors.
 - Azure-verified: direct `gpt-5.6-sol` planner inference through `DefaultAzureCredential`; no Azure API key is stored.
-- Still scaffolded: crawling, Blob Storage, AI Search, Cosmos DB, Service Bus, LLM synthesis/review agents, production Entra authorization, and the production release protocol.
-- The release endpoint returns `501 Not Implemented` until verified artifacts, authenticated approval, and conditional commit exist; this prototype never claims a report was published.
+- Remote synthesis, semantic fact-checking and critical review are implemented with strict output contracts and approval gates. Entra API token validation and transactional local release are opt-in.
+- Production gaps: cloud storage/search/queue adapters, API hosting/SSO, operational monitoring, live model evaluation and deployment verification.
+- Release remains disabled by default (`501`). With `ENABLE_REPORT_RELEASE=true`, passing model review, exact-content human approval and a separate publisher can create an authenticated local release artifact. This does not deploy or publish to Azure.
 
 ## Architecture
 

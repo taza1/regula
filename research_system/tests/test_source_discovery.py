@@ -2,12 +2,14 @@
 
 import pytest
 
+from src.config import get_research_config
 from src.local_store import LocalStateStore
 from src.models import PeerReviewStatus, ResearchRequest, SourceType
-from src.services import EvidenceService, ResearchRunService, source_passes_governance
+from src.services import EvidenceService, ResearchRunService, create_source_connector, source_passes_governance
 from src.evidence_extraction import ExtractionError, chunk_text, fetch_document
 from src.source_connectors import (
     ArxivConnector,
+    CompositeScholarlyConnector,
     CrossrefConnector,
     LocalSourceConnector,
     OpenAlexConnector,
@@ -164,6 +166,55 @@ async def test_discovery_deduplicates_sources_by_doi(tmp_path):
     assert result["sources"][0].metadata["canonical_source_id"].startswith("CAN-DOI-")
 
 
+@pytest.mark.asyncio
+async def test_discovery_spreads_source_budget_across_planner_queries(tmp_path):
+    class QueryTrackingConnector:
+        name = "query-tracking"
+
+        def __init__(self):
+            self.queries = []
+
+        async def search(self, query, *, limit=20, date_range_start=None, date_range_end=None):
+            self.queries.append((query, limit))
+            return [
+                SourceRecord(
+                    source_id=f"SRC-{len(self.queries)}",
+                    connector=self.name,
+                    title=f"Source for {query}",
+                    url=f"https://example.test/{len(self.queries)}",
+                    source_type=SourceType.PAPER,
+                    abstract=f"Evidence passage for {query}.",
+                    peer_review_status=PeerReviewStatus.UNKNOWN,
+                )
+            ]
+
+    store = LocalStateStore(str(tmp_path / "query-budget.db"))
+    run_service = ResearchRunService(store)
+    run = await run_service.create_run(
+        "TEN-1",
+        "PRJ-1",
+        ResearchRequest(
+            title="Query budget test",
+            primary_question="Does discovery reach later queries?",
+            scope_description="Budget",
+            max_sources=2,
+        ),
+    )
+    connector = QueryTrackingConnector()
+    service = EvidenceService(store, connector=connector)
+
+    result = await service.discover_and_ingest_plan(
+        "TEN-1", "PRJ-1", run.run_id,
+        {"search_queries": ["benefit query", "failure query", "limitation query"]},
+    )
+
+    assert [query for query, _ in connector.queries] == ["benefit query", "failure query"]
+    assert [source.title for source in result["sources"]] == [
+        "Source for benefit query",
+        "Source for failure query",
+    ]
+
+
 def test_openalex_connector_maps_work_to_source(monkeypatch):
     captured = {}
 
@@ -231,6 +282,29 @@ def test_openalex_connector_maps_work_to_source(monkeypatch):
     assert sources[0].metadata["source_display_name"] == "Journal of AI"
 
 
+def test_openalex_metadata_without_abstract_does_not_create_placeholder_evidence(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": [{
+                    "id": "https://openalex.org/WNOABSTRACT",
+                    "display_name": "Metadata only work",
+                    "type": "article",
+                    "publication_date": "2026-08-15",
+                }]
+            }
+
+    monkeypatch.setattr("src.source_connectors.requests.get", lambda *args, **kwargs: Response())
+
+    sources = OpenAlexConnector(request_interval_seconds=0).search_sync("metadata only", limit=1)
+
+    assert sources[0].abstract == ""
+    assert sources[0].passage == ""
+
+
 def test_crossref_connector_maps_work_and_filters(monkeypatch):
     captured = {}
 
@@ -265,7 +339,39 @@ def test_crossref_connector_maps_work_and_filters(monkeypatch):
     }
     assert result[0].abstract == "Useful & clear."
     assert result[0].authors == ["Ada Lovelace"]
-    assert result[0].peer_review_status == PeerReviewStatus.PEER_REVIEWED
+    assert result[0].peer_review_status == PeerReviewStatus.UNKNOWN
+
+
+def test_crossref_metadata_without_abstract_does_not_create_placeholder_evidence(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"items": [{
+                "DOI": "10.1234/no-abstract",
+                "URL": "https://doi.org/10.1234/no-abstract",
+                "title": ["Metadata only Crossref record"],
+                "type": "journal-article",
+            }]}}
+
+    monkeypatch.setattr("src.source_connectors.requests.get", lambda *args, **kwargs: Response())
+
+    sources = CrossrefConnector(request_interval_seconds=0).search_sync("metadata only", limit=1)
+
+    assert sources[0].abstract == ""
+    assert sources[0].passage == ""
+
+
+def test_scholarly_connector_uses_remote_providers_without_local_fallback(monkeypatch):
+    monkeypatch.setenv("SOURCE_CONNECTOR", "scholarly")
+    get_research_config.cache_clear()
+    try:
+        connector = create_source_connector()
+    finally:
+        get_research_config.cache_clear()
+
+    assert isinstance(connector, CompositeScholarlyConnector)
 
 
 def test_arxiv_connector_maps_and_filters_atom(monkeypatch):
