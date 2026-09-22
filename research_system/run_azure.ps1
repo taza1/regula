@@ -1,9 +1,9 @@
 param(
-    [string]$Endpoint = 'https://foundry-agent-90af7e99.openai.azure.com',
+    [string]$Endpoint = $env:AZURE_OPENAI_ENDPOINT,
     [string]$Deployment = 'gpt-5.6-sol',
     [int]$Port = 8000,
-    [ValidateSet('local', 'openalex', 'crossref', 'arxiv', 'scholarly_with_local_fallback', 'openalex_with_local_fallback')]
-    [string]$SourceConnector = 'local',
+    [ValidateSet('local', 'openalex', 'crossref', 'arxiv', 'scholarly', 'scholarly_with_local_fallback', 'openalex_with_local_fallback')]
+    [string]$SourceConnector = 'scholarly',
     [string]$OpenAlexMailto = ''
 )
 
@@ -15,6 +15,9 @@ $projectRoot = Split-Path -Parent $PSCommandPath
 az account show --only-show-errors | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Azure CLI is not signed in. Run 'az login' and retry."
+}
+if (-not $Endpoint) {
+    throw "Provide -Endpoint or set AZURE_OPENAI_ENDPOINT."
 }
 $env:MODEL_PROVIDER = 'azure'
 $env:AZURE_OPENAI_ENDPOINT = $Endpoint

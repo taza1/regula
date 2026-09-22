@@ -41,6 +41,11 @@
       <section class="panel draft-panel"><div class="section-heading"><h3>Cited draft</h3><span class="badge">Unreviewed</span></div><div id="draft"><p class="muted">The draft appears after evidence collection.</p></div></section>
     </div>
     <details class="panel"><summary>Collection details & citation findings</summary><div id="outcomes"></div></details>
+    <section class="panel" id="review-panel"><h3>Review and release</h3><div id="review-summary">Model review has not run.</div>
+      <button id="review-button" class="quiet" hidden>Run model review</button>
+      <form id="approval-form" hidden><label>Approval rationale<textarea id="approval-rationale" required></textarea></label><p class="form-error" role="alert"></p><button>Approve reviewed report</button></form>
+      <button id="release-button" hidden>Release approved report</button><div id="release-links"></div>
+    </section>
     <button id="retry" class="quiet" hidden>Start a new run with this question</button>
   </article>
   <footer>REGULA <span>Evidence first. Review before release.</span></footer>

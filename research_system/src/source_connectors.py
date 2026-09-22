@@ -244,13 +244,12 @@ class OpenAlexConnector:
             filters.append(
                 f"to_publication_date:{date_range_end.date().isoformat()}"
             )
-        search_text = _openalex_search_text(normalized)
+        search_text = _scholarly_search_text(normalized)
+        sort_latest = _looks_like_latest_query(normalized) and inferred_latest_window
         params: dict[str, Any] = {
             "search": search_text,
             "per-page": bounded_limit,
-            "sort": "publication_date:desc"
-            if _looks_like_latest_query(normalized) or date_range_start
-            else "relevance_score:desc",
+            "sort": "publication_date:desc" if sort_latest else "relevance_score:desc",
         }
         if filters:
             params["filter"] = ",".join(filters)
@@ -278,11 +277,6 @@ class OpenAlexConnector:
         if not title or not openalex_id:
             return None
         abstract = _abstract_from_inverted_index(item.get("abstract_inverted_index"))
-        if not abstract:
-            abstract = (
-                "OpenAlex returned metadata for this work, but no abstract text "
-                "was available in the API response."
-            )
         doi = _clean_doi(item.get("doi"))
         publication_date = _parse_date(item.get("publication_date"))
         work_type = str(item.get("type") or "").casefold()
@@ -356,7 +350,7 @@ class CrossrefConnector:
                                        date_range_start=date_range_start, date_range_end=date_range_end)
 
     def search_sync(self, query, *, limit=20, date_range_start=None, date_range_end=None):
-        normalized = " ".join(query.split())
+        normalized = _scholarly_search_text(query)
         if not normalized or int(limit) <= 0:
             return []
         if date_range_start is None and _looks_like_latest_query(normalized):
@@ -390,8 +384,6 @@ class CrossrefConnector:
         if not title or not (doi or url):
             return None
         abstract = _clean_markup(item.get("abstract", ""))
-        if not abstract:
-            abstract = "Crossref returned metadata for this work, but no abstract text was available."
         authors = []
         for author in item.get("author", []):
             name = " ".join(str(author.get(key, "")).strip() for key in ("given", "family")).strip()
@@ -405,10 +397,9 @@ class CrossrefConnector:
             source_type=SourceType.PREPRINT if is_preprint else SourceType.PAPER,
             abstract=abstract, authors=authors, doi=doi,
             published_at=_crossref_date(item),
-            peer_review_status=(PeerReviewStatus.PREPRINT if is_preprint else
-                                PeerReviewStatus.PEER_REVIEWED if work_type in
-                                {"journal-article", "book-chapter", "proceedings-article"} else
-                                PeerReviewStatus.UNKNOWN),
+            peer_review_status=(
+                PeerReviewStatus.PREPRINT if is_preprint else PeerReviewStatus.UNKNOWN
+            ),
             license=_crossref_license(item),
             metadata={"crossref_doi": doi, "doi": doi, "container_title": (item.get("container-title") or [None])[0],
                       "publisher": item.get("publisher"), "type": item.get("type"),
@@ -436,7 +427,7 @@ class ArxivConnector:
                                        date_range_start=date_range_start, date_range_end=date_range_end)
 
     def search_sync(self, query, *, limit=20, date_range_start=None, date_range_end=None):
-        normalized = " ".join(query.split())
+        normalized = _scholarly_search_text(query)
         if not normalized or int(limit) <= 0:
             return []
         bounded_limit = min(max(int(limit), 1), 100)
@@ -455,7 +446,7 @@ class ArxivConnector:
             response = _request_with_retry(
                 self.base_url,
                 params={"search_query": query_text, "start": page * bounded_limit,
-                        "max_results": bounded_limit, "sortBy": "submittedDate" if recent or date_range_start or date_range_end else "relevance",
+                        "max_results": bounded_limit, "sortBy": "submittedDate" if recent else "relevance",
                         "sortOrder": "descending"},
                 timeout=self.timeout_seconds, headers={"User-Agent": _user_agent("")},
                 min_interval_seconds=self.request_interval_seconds,
@@ -841,6 +832,15 @@ def _openalex_search_text(query: str) -> str:
         ):
             query = suffix
     query = re.sub(r"[\"“”]", " ", query)
+    query = re.sub(r"[:;!?]+", " ", query)
+    return " ".join(query.split())
+
+
+def _scholarly_search_text(query: str) -> str:
+    query = re.sub(r"\bsite:\S+", " ", query, flags=re.IGNORECASE)
+    query = re.sub(r"\b\d{4}\.\.\d{4}\b", " ", query)
+    query = re.sub(r"\b(AND|OR|NOT)\b", " ", query, flags=re.IGNORECASE)
+    query = re.sub(r"[()\"“”]", " ", query)
     query = re.sub(r"[:;!?]+", " ", query)
     return " ".join(query.split())
 
