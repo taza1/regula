@@ -8,11 +8,81 @@ This is an early implementation of the multi-agent research plan. The local vert
 
 ### Current implementation status
 
-- Working: health/OpenAPI, local project and run persistence, local auth headers and project membership checks, planner agent, legal run-state checks, scope confirmation, OpenAlex/Crossref/arXiv paper discovery with cross-provider deduplication, source snapshots, passage records, local evidence ingestion/search, deterministic draft skeleton, claim ledger, provider status, and guarded 401/403/404/409/502 errors.
-- Azure-verified: direct `gpt-5.6-sol` planner inference through `DefaultAzureCredential`; no Azure API key is stored.
+- Working locally: health/OpenAPI, dashboard, SQLite project/run persistence, local auth headers, project membership checks, planner, legal run-state checks, scope confirmation, background execution, OpenAlex/Crossref/arXiv discovery, source snapshots, passage records, local evidence ingestion/search, model-backed synthesis, semantic fact-checking, critical review, claim ledger, provider status, and guarded 401/403/404/409/502 errors.
+- Azure/AI Foundry verified locally: direct `gpt-5.6-sol` calls through `DefaultAzureCredential`; no Azure API key is stored. The local Azure launcher uses real scholarly sources by default through the `scholarly` connector.
+- Source hardening: live Azure/Playwright testing verified real Crossref/OpenAlex source records, no local synthetic fallback, no placeholder abstracts as evidence, relevance-biased explicit date searches, and budget spread across planner queries.
 - Remote synthesis, semantic fact-checking and critical review are implemented with strict output contracts and approval gates. Entra API token validation and transactional local release are opt-in.
-- Production gaps: cloud storage/search/queue adapters, API hosting/SSO, operational monitoring, live model evaluation and deployment verification.
+- Production gaps: deployed Azure adapters for Cosmos/Blob/Search/Service Bus, hosted API/SSO, production observability, live hosted-agent deployment verification, retrieval quality evaluation, and report publication governance.
 - Release remains disabled by default (`501`). With `ENABLE_REPORT_RELEASE=true`, passing model review, exact-content human approval and a separate publisher can create an authenticated local release artifact. This does not deploy or publish to Azure.
+
+## Quick Start
+
+Use Python 3.11+ from `research_system`.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Run the deterministic local app:
+
+```powershell
+.\run_local.ps1 -Port 8000
+```
+
+Open the dashboard:
+
+```text
+http://127.0.0.1:8000/dashboard
+```
+
+This mode uses `MODEL_PROVIDER=mock`, local SQLite at `data/research_system.db`, and local source fixtures. It does not call Azure or incur model usage.
+
+For real scholarly metadata while keeping the model mocked:
+
+```powershell
+.\run_local.ps1 -Port 8000 -SourceConnector scholarly
+```
+
+Run the Azure/AI Foundry-backed local app:
+
+```powershell
+az login
+.\run_azure.ps1 -Endpoint 'https://your-resource.openai.azure.com' -Deployment 'gpt-5.6-sol' -Port 8015
+```
+
+Open:
+
+```text
+http://127.0.0.1:8015/dashboard
+```
+
+The Azure launcher sets `MODEL_PROVIDER=azure`, uses Entra via `DefaultAzureCredential`, and defaults to `SOURCE_CONNECTOR=scholarly` so discovery uses OpenAlex, Crossref, and arXiv without local synthetic fallback.
+
+Recommended dashboard flow:
+
+1. Create a project.
+2. Create a run with title, question, scope, date range, and max sources.
+3. Generate the plan.
+4. Confirm scope and execute.
+5. Wait for background execution to finish.
+6. Review evidence, draft, model review, blockers, and approval controls.
+
+Run tests:
+
+```powershell
+$env:PYTHONPATH = (Get-Location).Path
+pytest -q
+```
+
+Optional browser tests:
+
+```powershell
+npm install
+npx playwright install chromium
+npm run test:e2e
+```
 
 ## Architecture
 
@@ -191,7 +261,7 @@ The old `tenant_id` query parameter is deprecated; if supplied, it must match `X
 To discover real research papers through the scholarly providers while keeping the planner mocked:
 
 ```powershell
-.\run_local.ps1 -SourceConnector scholarly_with_local_fallback
+.\run_local.ps1 -SourceConnector scholarly
 ```
 
 Use Swagger in this sequence:
@@ -205,7 +275,7 @@ Use Swagger in this sequence:
 7. `POST /api/v1/projects/{project_id}/runs/{run_id}/validate-citations-local`
 8. `POST /api/v1/projects/{project_id}/runs/{run_id}/search`
 
-Connector choices are `local` (the deterministic default), `openalex`, `crossref`, `arxiv`, `scholarly_with_local_fallback`, and the backward-compatible `openalex_with_local_fallback`. For questions like `What is the latest on AI?`, OpenAlex and Crossref search recent works newest-first unless you provide an explicit date range on the run. Scholarly aggregation deduplicates shared DOI, arXiv, OpenAlex, and canonical identifiers. Before persistence, source URLs are checked against each run's approved/excluded domains and explicit licenses are checked against the configured extraction policy. External requests use bounded retries with exponential backoff and jitter; arXiv defaults to one request every three seconds.
+Connector choices are `local` (the deterministic default), `openalex`, `crossref`, `arxiv`, `scholarly`, `scholarly_with_local_fallback`, and the backward-compatible `openalex_with_local_fallback`. Use `scholarly` for live research checks because it does not fall back to synthetic local sources. For questions like `What is the latest on AI?`, OpenAlex and Crossref search recent works newest-first unless you provide an explicit date range on the run. Explicit date ranges keep relevance-biased ranking. Scholarly aggregation deduplicates shared DOI, arXiv, OpenAlex, and canonical identifiers. Before persistence, source URLs are checked against each run's approved/excluded domains and explicit licenses are checked against the configured extraction policy. External requests use bounded retries with exponential backoff and jitter; arXiv defaults to one request every three seconds.
 
 The default execution path ingests provider abstracts without document network I/O. Call `EvidenceService.ingest_full_sources(...)` explicitly when a run has approved domains and licenses: it safely fetches an identified PDF or HTML URL, enforces content-size/type limits, extracts normalized text, chunks it into bounded passages, removes duplicate chunks by SHA-256, and stores the resulting source snapshots and passages in SQLite.
 `synthesize-local` creates a draft skeleton and claim ledger for review. `validate-citations-local` checks that each claim resolves to eligible evidence from the same run/revision and that deterministic draft text occurs in the cited passage. It does not perform semantic fact-checking, critical review, approval, or release.
@@ -216,21 +286,21 @@ Cancelled or terminal runs cannot be confirmed or executed again; create a new r
 Sign in with `az login`, then run:
 
 ```powershell
-.\run_azure.ps1
+.\run_azure.ps1 -Endpoint 'https://your-resource.openai.azure.com' -Deployment 'gpt-5.6-sol'
 ```
 
-The launcher uses the existing `gpt-5.6-sol` default for this checkout. Override it when needed:
+The launcher defaults to deployment `gpt-5.6-sol` and source connector `scholarly`. It requires either `-Endpoint` or `AZURE_OPENAI_ENDPOINT`:
 
 ```powershell
 .\run_azure.ps1 -Endpoint 'https://your-resource.openai.azure.com' -Deployment 'your-deployment' -Port 8010
 ```
 
-Locally, `DefaultAzureCredential` uses the Azure CLI session. In Azure hosting it can use managed identity. The model-backed operation is `POST /api/v1/projects/{project_id}/runs/{run_id}/plan`.
+Locally, `DefaultAzureCredential` uses the Azure CLI session. In Azure hosting it can use managed identity. The dashboard flow calls the model during planning and, when executed with a remote provider, during synthesis, fact-checking, and critical review.
 
-You can combine Azure planning with OpenAlex discovery:
+You can override the source connector when needed:
 
 ```powershell
-.\run_azure.ps1 -SourceConnector openalex_with_local_fallback
+.\run_azure.ps1 -Endpoint 'https://your-resource.openai.azure.com' -SourceConnector openalex
 ```
 
 ### Docker Deployment
@@ -305,47 +375,33 @@ npm run test:e2e
 2. **Local-only boundary**: local development uses `X-Tenant-Id` and `X-User-Id` headers; production Entra authorization is not implemented.
 3. **Planned controls**: managed identity, Cosmos isolation, Key Vault, private networking, source-policy enforcement, and complete audit records remain future work.
 
-## Next Steps for Implementation
+## Remaining Work and Improvements
 
-### Phase 1: Core Infrastructure
-- [ ] Cosmos DB schema and container setup
-- [ ] Azure Blob Storage configuration
-- [ ] Azure AI Search index creation
-- [ ] Service Bus queue setup
-- [ ] Application Insights integration
+### Before production
+- [ ] Deploy and verify Azure infrastructure: Cosmos DB, Blob Storage, Azure AI Search, Service Bus, Key Vault, managed identities, private networking, monitoring, and backups.
+- [ ] Replace local SQLite/queue/runtime adapters with Cosmos transactional state, immutable Blob artifacts, Service Bus workers/outbox delivery, and Azure AI Search indexing.
+- [ ] Deploy and verify the Foundry hosted agent package, including identity, endpoint authorization, private DNS, egress, model access, and redacted telemetry.
+- [ ] Add production API hosting and browser Entra sign-in. Local `X-Tenant-Id` and `X-User-Id` headers are development-only.
+- [ ] Add deployment pipelines, rollback automation, smoke tests, backup/restore exercises, and operational runbooks.
 
-### Phase 2: Agent Implementation
-- [ ] LLM integration for Planner and Synthesis agents
-- [x] OpenAlex connector
-- [x] Local source snapshots, passage records, draft skeleton, and claim ledger
-- [x] Crossref and arXiv connectors
-- [ ] Web crawler with robots.txt compliance
-- [ ] PDF and HTML extraction
-- [ ] Passage-level citation tracking
+### Research quality
+- [ ] Add full-text retrieval/evaluation beyond abstracts, with source-license/domain policy controls.
+- [ ] Add retrieval evaluation fixtures for relevance, recall, contradiction coverage, source independence, and temporal coverage.
+- [ ] Improve query planning and provider-specific query translation for negative/null-result evidence.
+- [ ] Add semantic/vector retrieval and measured precision/recall before relying on Azure AI Search ranking.
+- [ ] Add model evals for entailment, unsupported claims, source overlap, bias, prompt injection, and stale/conflicting evidence.
 
-### Phase 3: Search and Retrieval
-- [ ] Embedding generation pipeline
-- [ ] Hybrid search implementation (keyword + semantic + vector)
-- [ ] Query expansion and relevance ranking
-- [ ] Search evaluation metrics
+### Release governance
+- [x] Model-driven synthesis, semantic fact-checking, critical review, approval gates, and local release artifact transaction.
+- [x] Dashboard review status plus approval/release controls.
+- [ ] Production release storage, withdrawal, audit export, and outbox delivery.
+- [ ] Human reviewer workflow for adjudication when model review blocks a report.
+- [ ] Policy decisions for who can approve, publish, withdraw, and externally share reports.
 
-### Phase 4: Review Pipeline
-- [ ] Fact-checker agent implementation
-- [ ] Critical reviewer agent implementation
-- [ ] Citation validator implementation
-- [ ] Quality gate evaluation
-
-### Phase 5: Release Workflow
-- [ ] Release artifact preparation
-- [ ] ADR-015 protocol implementation
-- [ ] Approval workflow UI
-- [ ] Release withdrawal and audit
-
-### Phase 6: Operations & Monitoring
-- [ ] OpenTelemetry instrumentation
-- [ ] Cost tracking and budget enforcement
-- [ ] Failure recovery procedures
-- [ ] Migration and versioning support
+### Developer experience
+- [ ] Keep the Playwright live Azure source-audit script as a documented, non-CI smoke test if repeated live verification is desired.
+- [ ] Add a sample `.env.local.example` for common local Azure settings without resource-specific values.
+- [ ] Add troubleshooting docs for Azure CLI auth, missing deployment names, source-provider rate limits, and failed model review.
 
 ## Configuration Reference
 
