@@ -186,12 +186,14 @@ class OpenAlexConnector:
         *,
         base_url: str = "https://api.openalex.org",
         mailto: str = "",
+        api_key: str = "",
         timeout_seconds: float = 20.0,
         latest_query_days: int = 180,
         request_interval_seconds: float = 0.1,
     ):
         self.base_url = base_url.rstrip("/")
         self.mailto = " ".join(mailto.split())
+        self.api_key = api_key.strip()
         self.timeout_seconds = timeout_seconds
         self.latest_query_days = latest_query_days
         self.request_interval_seconds = request_interval_seconds
@@ -244,7 +246,7 @@ class OpenAlexConnector:
             filters.append(
                 f"to_publication_date:{date_range_end.date().isoformat()}"
             )
-        search_text = _scholarly_search_text(normalized)
+        search_text = _provider_search_text(normalized, "openalex")
         sort_latest = _looks_like_latest_query(normalized) and inferred_latest_window
         params: dict[str, Any] = {
             "search": search_text,
@@ -255,6 +257,8 @@ class OpenAlexConnector:
             params["filter"] = ",".join(filters)
         if self.mailto:
             params["mailto"] = self.mailto
+        if self.api_key:
+            params["api_key"] = self.api_key
 
         response = _request_with_retry(
             f"{self.base_url}/works",
@@ -265,11 +269,12 @@ class OpenAlexConnector:
         )
         response.raise_for_status()
         data = response.json()
-        return [
+        records = [
             record
             for item in data.get("results", [])
             if (record := self._record_from_work(item)) is not None
-        ][:bounded_limit]
+        ]
+        return rank_sources(records, normalized)[:bounded_limit]
 
     def _record_from_work(self, item: dict[str, Any]) -> Optional[SourceRecord]:
         title = (item.get("display_name") or item.get("title") or "").strip()
@@ -288,6 +293,7 @@ class OpenAlexConnector:
         )
         host_venue = item.get("host_venue") or {}
         primary_location = item.get("primary_location") or {}
+        best_oa_location = item.get("best_oa_location") or {}
         best_url = (
             item.get("doi")
             or item.get("landing_page_url")
@@ -326,6 +332,11 @@ class OpenAlexConnector:
                 or host_venue.get("display_name"),
                 "is_retracted": item.get("is_retracted"),
                 "open_access": item.get("open_access"),
+                "full_text_url": (
+                    best_oa_location.get("pdf_url")
+                    or primary_location.get("pdf_url")
+                    or best_oa_location.get("landing_page_url")
+                ),
             },
             policy_version="OPENALEX-1",
         )
@@ -350,14 +361,14 @@ class CrossrefConnector:
                                        date_range_start=date_range_start, date_range_end=date_range_end)
 
     def search_sync(self, query, *, limit=20, date_range_start=None, date_range_end=None):
-        normalized = _scholarly_search_text(query)
+        normalized = _provider_search_text(query, "crossref")
         if not normalized or int(limit) <= 0:
             return []
         if date_range_start is None and _looks_like_latest_query(normalized):
             date_range_start = datetime.utcnow() - timedelta(days=self.latest_query_days)
             date_range_end = date_range_end or datetime.utcnow()
         bounded_limit = min(max(int(limit), 1), 1000)
-        params = {"query": normalized, "rows": bounded_limit}
+        params = {"query.bibliographic": normalized, "rows": bounded_limit}
         if self.mailto:
             params["mailto"] = self.mailto
         if date_range_start:
@@ -372,7 +383,8 @@ class CrossrefConnector:
         )
         response.raise_for_status()
         items = response.json().get("message", {}).get("items", [])
-        return [record for item in items if (record := self._record_from_work(item)) is not None][:bounded_limit]
+        records = [record for item in items if (record := self._record_from_work(item)) is not None]
+        return rank_sources(records, normalized)[:bounded_limit]
 
     def _record_from_work(self, item):
         doi = _clean_doi(item.get("DOI"))
@@ -391,6 +403,11 @@ class CrossrefConnector:
         authors = [author for author in authors if author]
         work_type = str(item.get("type", "")).casefold()
         is_preprint = work_type == "posted-content" or "preprint" in work_type
+        links = item.get("link") or []
+        full_text_url = next((link.get("URL") for link in links
+                              if isinstance(link, dict) and link.get("URL")
+                              and str(link.get("content-type", "")).casefold() in
+                              {"application/pdf", "text/html", "application/xml", "text/xml"}), None)
         return SourceRecord(
             source_id="CROSSREF-" + _stable_id(doi or url),
             connector=self.name, title=title, url=str(url),
@@ -403,7 +420,8 @@ class CrossrefConnector:
             license=_crossref_license(item),
             metadata={"crossref_doi": doi, "doi": doi, "container_title": (item.get("container-title") or [None])[0],
                       "publisher": item.get("publisher"), "type": item.get("type"),
-                      "is_referenced_by_count": item.get("is-referenced-by-count")},
+                      "is_referenced_by_count": item.get("is-referenced-by-count"),
+                      "full_text_url": full_text_url},
             policy_version="CROSSREF-1",
         )
 
@@ -427,15 +445,16 @@ class ArxivConnector:
                                        date_range_start=date_range_start, date_range_end=date_range_end)
 
     def search_sync(self, query, *, limit=20, date_range_start=None, date_range_end=None):
-        normalized = _scholarly_search_text(query)
+        normalized = _provider_search_text(query, "arxiv")
         if not normalized or int(limit) <= 0:
             return []
         bounded_limit = min(max(int(limit), 1), 100)
+        fetch_limit = min(max(bounded_limit * 3, bounded_limit), 100)
         recent = _looks_like_latest_query(normalized)
         if date_range_start is None and recent:
             date_range_start = datetime.utcnow() - timedelta(days=self.latest_query_days)
             date_range_end = date_range_end or datetime.utcnow()
-        query_text = f"all:({normalized})"
+        query_text = _arxiv_search_query(normalized)
         if date_range_start or date_range_end:
             start = date_range_start.strftime("%Y%m%d0000") if date_range_start else "199101010000"
             end = date_range_end.strftime("%Y%m%d2359") if date_range_end else datetime.utcnow().strftime("%Y%m%d2359")
@@ -445,8 +464,8 @@ class ArxivConnector:
         for page in range(self.max_pages):
             response = _request_with_retry(
                 self.base_url,
-                params={"search_query": query_text, "start": page * bounded_limit,
-                        "max_results": bounded_limit, "sortBy": "submittedDate" if recent else "relevance",
+                params={"search_query": query_text, "start": page * fetch_limit,
+                        "max_results": fetch_limit, "sortBy": "submittedDate" if recent else "relevance",
                         "sortOrder": "descending"},
                 timeout=self.timeout_seconds, headers={"User-Agent": _user_agent("")},
                 min_interval_seconds=self.request_interval_seconds,
@@ -464,9 +483,9 @@ class ArxivConnector:
                 if record and record.source_id not in seen and _in_date_range(record.published_at, date_range_start, date_range_end):
                     seen.add(record.source_id)
                     records.append(record)
-            if len(records) >= bounded_limit or len(entries) < bounded_limit:
+            if len(records) >= fetch_limit or len(entries) < fetch_limit:
                 break
-        return records[:bounded_limit]
+        return rank_sources(records, normalized)[:bounded_limit]
 
     def _record_from_entry(self, entry):
         atom = "{http://www.w3.org/2005/Atom}"
@@ -494,7 +513,8 @@ class ArxivConnector:
                                            if entry.find(arxiv_ns + "primary_category") is not None else None),
                       "categories": [node.get("term") for node in entry.findall(atom + "category") if node.get("term")],
                       "journal_ref": entry.findtext(arxiv_ns + "journal_ref"),
-                      "comment": entry.findtext(arxiv_ns + "comment"), "pdf_url": pdf_url},
+                      "comment": entry.findtext(arxiv_ns + "comment"), "pdf_url": pdf_url,
+                      "full_text_url": pdf_url},
             policy_version="ARXIV-1",
         )
 
@@ -513,7 +533,8 @@ class CompositeScholarlyConnector:
             connector, query, limit=limit, date_range_start=date_range_start,
             date_range_end=date_range_end) for connector in self.connectors))
         interleaved = [item for row in zip_longest(*batches) for item in row if item is not None]
-        return SourceResults(deduplicate_sources(interleaved)[:max(0, int(limit))],
+        ranked = rank_sources(deduplicate_sources(interleaved), query)
+        return SourceResults(ranked[:max(0, int(limit))],
                              [outcome for batch in batches for outcome in batch.outcomes])
 
 
@@ -607,6 +628,66 @@ def _tokens(value: str) -> set[str]:
         for token in re.findall(r"[a-z0-9]{2,}", value.casefold())
         if token not in {"and", "for", "the", "with", "from", "what", "does"}
     }
+
+
+def _ordered_query_terms(value: str) -> list[str]:
+    """Return provider-safe content terms while removing planner boilerplate."""
+
+    stop = {
+        "and", "for", "the", "with", "from", "what", "does", "how", "why",
+        "which", "who", "where", "when", "research", "studies", "study", "say",
+        "evidence", "latest", "recent", "current", "new", "emerging", "about",
+        "regarding", "relevant", "compare", "comparison", "impact", "effects", "on",
+    }
+    terms = []
+    for token in re.findall(r"[a-z0-9][a-z0-9.+-]{1,}", value.casefold()):
+        if token not in stop and token not in terms:
+            terms.append(token)
+    return terms[:12]
+
+
+def _provider_search_text(query: str, provider: str) -> str:
+    cleaned = _scholarly_search_text(query)
+    terms = _ordered_query_terms(cleaned)
+    if not terms:
+        return cleaned
+    # Crossref and OpenAlex both accept natural bibliographic text. Keeping only
+    # content-bearing terms prevents planner prose from dominating relevance.
+    return " ".join(terms)
+
+
+def _arxiv_search_query(query: str) -> str:
+    terms = _ordered_query_terms(query)
+    if not terms:
+        terms = re.findall(r"[a-z0-9][a-z0-9.+-]{1,}", query.casefold())[:8]
+    return " AND ".join(f"all:{term}" for term in terms[:8])
+
+
+def source_relevance_score(source: SourceRecord, query: str) -> float:
+    """Deterministic lexical reranker shared across scholarly providers."""
+
+    terms = set(_ordered_query_terms(query))
+    if not terms:
+        return 0.0
+    title_tokens = _tokens(source.title)
+    abstract_tokens = _tokens(source.abstract or source.passage)
+    title_hits = len(terms & title_tokens)
+    abstract_hits = len(terms & abstract_tokens)
+    coverage = len(terms & (title_tokens | abstract_tokens)) / len(terms)
+    phrase = " ".join(_ordered_query_terms(query))
+    exact_bonus = 2.0 if phrase and phrase in f"{source.title} {source.abstract}".casefold() else 0.0
+    return round(title_hits * 3.0 + abstract_hits + coverage * 4.0 + exact_bonus, 6)
+
+
+def rank_sources(sources: Sequence[SourceRecord], query: str) -> list[SourceRecord]:
+    """Sort by query coverage, retaining stable provider order for ties."""
+
+    scored = []
+    for index, source in enumerate(sources):
+        score = source_relevance_score(source, query)
+        metadata = {**source.metadata, "local_relevance_score": score}
+        scored.append((score, index, source.model_copy(update={"metadata": metadata})))
+    return [source for _, _, source in sorted(scored, key=lambda row: (-row[0], row[1]))]
 
 
 def _stable_id(value: str) -> str:

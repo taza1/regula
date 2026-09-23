@@ -10,7 +10,8 @@ This is an early implementation of the multi-agent research plan. The local vert
 
 - Working locally: health/OpenAPI, dashboard, SQLite project/run persistence, local auth headers, project membership checks, planner, legal run-state checks, scope confirmation, background execution, OpenAlex/Crossref/arXiv discovery, source snapshots, passage records, local evidence ingestion/search, model-backed synthesis, semantic fact-checking, critical review, claim ledger, provider status, and guarded 401/403/404/409/502 errors.
 - Azure/AI Foundry verified locally: direct `gpt-5.6-sol` calls through `DefaultAzureCredential`; no Azure API key is stored. The local Azure launcher uses real scholarly sources by default through the `scholarly` connector.
-- Source hardening: live Azure/Playwright testing verified real Crossref/OpenAlex source records, no local synthetic fallback, no placeholder abstracts as evidence, relevance-biased explicit date searches, and budget spread across planner queries.
+- Source hardening: live Azure/Playwright testing verified real Crossref/OpenAlex source records, no local synthetic fallback, no placeholder abstracts as evidence, provider-specific query cleanup, deterministic relevance reranking, and budget spread across planner queries.
+- Licensed full text is opt-in per run. It uses provider-advertised document URLs, requires an explicit recognized licence plus an approved domain, and stores bounded HTML/PDF passages with content hashes.
 - Remote synthesis, semantic fact-checking and critical review are implemented with strict output contracts and approval gates. Entra API token validation and transactional local release are opt-in.
 - Production gaps: deployed Azure adapters for Cosmos/Blob/Search/Service Bus, hosted API/SSO, production observability, live hosted-agent deployment verification, retrieval quality evaluation, and report publication governance.
 - Release remains disabled by default (`501`). With `ENABLE_REPORT_RELEASE=true`, passing model review, exact-content human approval and a separate publisher can create an authenticated local release artifact. This does not deploy or publish to Azure.
@@ -83,6 +84,15 @@ npm install
 npx playwright install chromium
 npm run test:e2e
 ```
+
+Run the opt-in live retrieval quality fixtures:
+
+```powershell
+$env:SOURCE_CONNECTOR = 'scholarly'
+python scripts\run_quality_evals.py --suite retrieval --output data\retrieval-eval.json
+```
+
+The model fixtures and full live Playwright flow make remote model calls. See [docs/LIVE_INTEGRATION_SMOKE.md](docs/LIVE_INTEGRATION_SMOKE.md) for the guarded commands.
 
 ## Architecture
 
@@ -385,11 +395,12 @@ npm run test:e2e
 - [ ] Add deployment pipelines, rollback automation, smoke tests, backup/restore exercises, and operational runbooks.
 
 ### Research quality
-- [ ] Add full-text retrieval/evaluation beyond abstracts, with source-license/domain policy controls.
-- [ ] Add retrieval evaluation fixtures for relevance, recall, contradiction coverage, source independence, and temporal coverage.
-- [ ] Improve query planning and provider-specific query translation for negative/null-result evidence.
+- [x] Add opt-in licensed full-text retrieval beyond abstracts, with source-license/domain policy controls.
+- [x] Add repeatable retrieval evaluation fixtures for relevance, recall, contradiction coverage, source independence, and temporal coverage.
+- [x] Improve provider-specific query translation and local reranking; continue tuning negative/null-result recall using evaluation results.
 - [ ] Add semantic/vector retrieval and measured precision/recall before relying on Azure AI Search ranking.
-- [ ] Add model evals for entailment, unsupported claims, source overlap, bias, prompt injection, and stale/conflicting evidence.
+- [x] Add runnable model eval fixtures for entailment, unsupported claims, bias, prompt injection, and stale/conflicting evidence.
+- [ ] Expand model and retrieval fixtures with adjudicated domain-specific gold sets and regression thresholds.
 
 ### Release governance
 - [x] Model-driven synthesis, semantic fact-checking, critical review, approval gates, and local release artifact transaction.
@@ -399,7 +410,7 @@ npm run test:e2e
 - [ ] Policy decisions for who can approve, publish, withdraw, and externally share reports.
 
 ### Developer experience
-- [ ] Keep the Playwright live Azure source-audit script as a documented, non-CI smoke test if repeated live verification is desired.
+- [x] Keep a documented Playwright live Azure/Foundry source-audit test as an opt-in, non-CI smoke test.
 - [ ] Add a sample `.env.local.example` for common local Azure settings without resource-specific values.
 - [ ] Add troubleshooting docs for Azure CLI auth, missing deployment names, source-provider rate limits, and failed model review.
 

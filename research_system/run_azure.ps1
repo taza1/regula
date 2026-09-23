@@ -4,7 +4,9 @@ param(
     [int]$Port = 8000,
     [ValidateSet('local', 'openalex', 'crossref', 'arxiv', 'scholarly', 'scholarly_with_local_fallback', 'openalex_with_local_fallback')]
     [string]$SourceConnector = 'scholarly',
-    [string]$OpenAlexMailto = ''
+    [string]$OpenAlexMailto = '',
+    [string]$OpenAlexApiKey = '',
+    [string]$CrossrefMailto = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +28,12 @@ $env:AZURE_OPENAI_TOKEN_SCOPE = 'https://cognitiveservices.azure.com/.default'
 $env:SOURCE_CONNECTOR = $SourceConnector
 if ($OpenAlexMailto) {
     $env:OPENALEX_MAILTO = $OpenAlexMailto
+}
+if ($OpenAlexApiKey) {
+    $env:OPENALEX_API_KEY = $OpenAlexApiKey
+}
+if ($CrossrefMailto) {
+    $env:CROSSREF_MAILTO = $CrossrefMailto
 }
 $env:LOCAL_DB_PATH = Join-Path $projectRoot 'data\research_system.db'
 
