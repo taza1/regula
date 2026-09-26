@@ -24,6 +24,8 @@ npm run test:e2e:live
 
 After an agent version is active, start the API with `MODEL_PROVIDER=foundry`, `FOUNDRY_PROJECT_ENDPOINT`, and `FOUNDRY_AGENT_NAME`. Then set `EXPECTED_MODEL_PROVIDER=foundry` and run the same Playwright command.
 
+The deployment script defaults hosted sessions to the minimum supported two-minute idle timeout. Compute is deprovisioned after that idle period; model token charges remain separate.
+
 The test fails unless the dashboard loads, the selected provider is remote, the source connector is exactly `scholarly`, all three provider outcomes are present, evidence is non-synthetic, model review completes, and the run reaches either `awaiting_approval` or the safe `adjudication_required` state.
 
 ## Quality evaluations

@@ -1,9 +1,15 @@
 """Package by default. --apply creates a Foundry version and requires operator approval."""
 import argparse
 import time
+from datetime import timedelta
 
 from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import CodeConfiguration, HostedAgentDefinition, ProtocolVersionRecord
+from azure.ai.projects.models import (
+    CodeConfiguration,
+    HostedAgentDefinition,
+    ProtocolVersionRecord,
+    SessionConfiguration,
+)
 from azure.identity import DefaultAzureCredential
 
 from package_agent import package
@@ -15,6 +21,8 @@ def main():
     parser.add_argument('--model-endpoint', required=True)
     parser.add_argument('--deployment', required=True)
     parser.add_argument('--agent-name', default='regula-research-review')
+    parser.add_argument('--idle-timeout-seconds', type=int, default=120,
+                        choices=range(120, 3601), metavar='120..3600')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     path, sha = package()
@@ -23,11 +31,14 @@ def main():
         code_configuration=CodeConfiguration(runtime='python_3_13', entry_point=['python','main.py'],
                                                dependency_resolution='remote_build'),
         protocol_versions=[ProtocolVersionRecord(protocol='responses', version='2.0.0')],
+        session_configuration=SessionConfiguration(
+            idle_timeout_seconds=timedelta(seconds=args.idle_timeout_seconds)),
         environment_variables={'MODEL_PROVIDER':'azure', 'AZURE_OPENAI_ENDPOINT':args.model_endpoint,
                                'OPENAI_DEPLOYMENT_ID':args.deployment,
                                'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT':'false'},
     )
-    print(f'Prepared {args.agent_name}: {path.name}, sha256={sha}, compute=1 CPU/2Gi.')
+    print(f'Prepared {args.agent_name}: {path.name}, sha256={sha}, compute=1 CPU/2Gi, '
+          f'idle timeout={args.idle_timeout_seconds}s.')
     if not args.apply:
         print('No Azure changes. --apply creates a hosted agent version and incurs usage charges.')
         return
