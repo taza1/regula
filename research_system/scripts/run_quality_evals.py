@@ -5,14 +5,17 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.config import get_model_config
 from src.model_client import create_model_client
 from src.quality_evals import ModelEvalCase, RetrievalEvalCase, evaluate_model_case, evaluate_retrieval
 from src.services import create_source_connector
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 async def run(suite: str, selected_cases: set[str] | None = None) -> dict:

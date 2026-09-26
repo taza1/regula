@@ -1,4 +1,5 @@
 const { test, expect } = require("@playwright/test");
+const fs = require("fs/promises");
 
 const enabled = process.env.RUN_LIVE_RESEARCH_E2E === "1";
 const baseURL = process.env.RESEARCH_BASE_URL || "http://127.0.0.1:8015";
@@ -66,6 +67,7 @@ test("live scholarly sources and Azure or Foundry model complete a guarded resea
   expect(["awaiting_approval", "adjudication_required"]).toContain(results.run.state);
   expect(results.execution.status).toBe("completed");
   expect(results.evidence.length).toBeGreaterThan(0);
+  expect(results.draft).toBeTruthy();
   expect(results.model_review).toBeTruthy();
   expect(results.model_review.provider).toBe(expectedProvider);
   const providers = new Set(results.execution.provider_outcomes.map(item => item.provider));
@@ -73,9 +75,26 @@ test("live scholarly sources and Azure or Foundry model complete a guarded resea
   expect(providers.has("crossref")).toBeTruthy();
   expect(providers.has("arxiv")).toBeTruthy();
   expect(results.evidence.every(item => !item.url.startsWith("local://"))).toBeTruthy();
+  expect(results.evidence.every(item => /^https:\/\//.test(item.url) && item.passage.trim())).toBeTruthy();
 
+  const evidenceIds = new Set(results.evidence.map(item => item.evidence_id));
+  const referenceIds = new Set(results.draft.references.map(item => item.evidence_id));
+  const claims = results.model_review.claims;
+  expect(claims.length).toBeGreaterThan(0);
+  for (const claim of claims) {
+    expect(claim.evidence_ids.length).toBeGreaterThan(0);
+    expect(claim.evidence_ids.every(id => evidenceIds.has(id))).toBeTruthy();
+    expect(claim.evidence_ids.every(id => referenceIds.has(id))).toBeTruthy();
+  }
+  const claimIds = claims.map(item => item.claim_id).sort();
+  const checkedClaimIds = results.model_review.fact_check.verdicts.map(item => item.claim_id).sort();
+  expect(checkedClaimIds).toEqual(claimIds);
+
+  const artifact = { projectId, runId, provider, info, results };
+  const artifactPath = testInfo.outputPath("live-research-result.json");
+  await fs.writeFile(artifactPath, JSON.stringify(artifact, null, 2));
   await testInfo.attach("live-research-result", {
-    body: Buffer.from(JSON.stringify({ projectId, runId, provider, info, results }, null, 2)),
+    path: artifactPath,
     contentType: "application/json",
   });
 });
