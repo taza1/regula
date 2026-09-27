@@ -116,6 +116,10 @@ class ResearchConfig(BaseSettings):
         default="",
         description="Optional email for OpenAlex polite pool requests",
     )
+    openalex_api_key: str = Field(
+        default="",
+        description="Optional OpenAlex API key; a free key raises the daily request budget",
+    )
     openalex_timeout_seconds: float = Field(
         default=20.0,
         gt=0,

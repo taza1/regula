@@ -796,7 +796,7 @@ class EvidenceService:
                 source_identity += "|full_text"
             snapshot_id = "SSN-" + _sha256_hex(source_identity)[:16].upper()
             passage_id = "PAS-" + _sha256_hex(
-                f"{snapshot_id}|abstract|0|{content_hash}"
+                f"{snapshot_id}|{section}|{source.metadata.get('extraction_chunk_index', 0)}|{content_hash}"
             )[:16].upper()
             evidence_id = "EVD-" + hashlib.sha256(
                 f"{tenant_id}|{project_id}|{run_id}|{canonical_id}|{passage_id}".encode(
@@ -907,17 +907,23 @@ class EvidenceService:
         config = get_research_config()
         expanded: List[SourceRecord] = []
         for source in sources:
+            retrieval_url = source.metadata.get("full_text_url")
+            if not isinstance(retrieval_url, str) or not retrieval_url.strip():
+                continue
+            retrieval_source = source.model_copy(update={"url": retrieval_url.strip()})
             if not source_passes_governance(
-                source,
+                retrieval_source,
                 approved_domains=run.research_request.approved_source_domains,
                 excluded_domains=run.research_request.excluded_domains,
                 allowed_licenses=config.allowed_source_licenses,
-                require_permissive_license=config.require_permissive_license,
+                # Full-document storage is stricter than metadata/abstract
+                # discovery: an explicit recognized licence is mandatory.
+                require_permissive_license=True,
             ):
                 continue
             document = await asyncio.to_thread(
                 fetch_document,
-                source,
+                retrieval_source,
                 approved_domains=run.research_request.approved_source_domains,
                 excluded_domains=run.research_request.excluded_domains,
                 timeout_seconds=config.openalex_timeout_seconds,
@@ -1240,6 +1246,7 @@ def create_source_connector() -> SourceConnector:
         return OpenAlexConnector(
             base_url=config.openalex_base_url,
             mailto=config.openalex_mailto,
+            api_key=config.openalex_api_key,
             timeout_seconds=config.openalex_timeout_seconds,
             request_interval_seconds=config.openalex_request_interval_seconds,
             latest_query_days=config.latest_query_days,
@@ -1249,6 +1256,7 @@ def create_source_connector() -> SourceConnector:
             OpenAlexConnector(
                 base_url=config.openalex_base_url,
                 mailto=config.openalex_mailto,
+                api_key=config.openalex_api_key,
                 timeout_seconds=config.openalex_timeout_seconds,
                 request_interval_seconds=config.openalex_request_interval_seconds,
                 latest_query_days=config.latest_query_days,
@@ -1264,6 +1272,7 @@ def create_source_connector() -> SourceConnector:
     if provider == "scholarly":
         return CompositeScholarlyConnector((
             OpenAlexConnector(base_url=config.openalex_base_url, mailto=config.openalex_mailto,
+                              api_key=config.openalex_api_key,
                               timeout_seconds=config.openalex_timeout_seconds,
                               latest_query_days=config.latest_query_days,
                               request_interval_seconds=config.openalex_request_interval_seconds),
@@ -1277,6 +1286,7 @@ def create_source_connector() -> SourceConnector:
     if provider == "scholarly_with_local_fallback":
         return FallbackSourceConnector(CompositeScholarlyConnector((
             OpenAlexConnector(base_url=config.openalex_base_url, mailto=config.openalex_mailto,
+                              api_key=config.openalex_api_key,
                               timeout_seconds=config.openalex_timeout_seconds,
                               latest_query_days=config.latest_query_days,
                               request_interval_seconds=config.openalex_request_interval_seconds),
