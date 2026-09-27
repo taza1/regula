@@ -13,6 +13,7 @@ The project documentation is grouped as follows:
 - [`AZURE_DELIVERY_PLAN.md`](AZURE_DELIVERY_PLAN.md) - reviewed Azure migration and end-to-end delivery plan
 - [`AZURE_TASK_BREAKDOWN.md`](AZURE_TASK_BREAKDOWN.md) - execution waves, task mapping, and acceptance matrix
 - [`HARDENING_BACKLOG.md`](HARDENING_BACKLOG.md) - six audit follow-up subtasks, priorities, and acceptance criteria
+- [`tasks/README.md`](tasks/README.md) - separate execution specifications for the six remaining quality and Foundry integration tasks
 
 The source code is in [`../src/`](../src/) and automated tests are in
 [`../tests/`](../tests/).
