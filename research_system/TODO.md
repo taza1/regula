@@ -2,11 +2,11 @@
 
 ## Current checkout status (2026-10-11)
 
-- This checkout is `feature/research-dashboard-execution` at `c466d58`; it is 11 commits behind `origin/master` (`2b0831e`).
-- The newest branch tip is `feature/research-quality-evals` at `45bea89`. It adds the latest research-quality task breakdown on top of the newer master line.
-- The uncommitted dashboard and worker files here match the implementation merged into `origin/master`. The local dashboard journey was verified in Playwright; Python tests passed.
+- This checkout is `feature/research-dashboard-execution` at `31b70fa`, pushed to `origin/feature/research-dashboard-execution`. No pull request has been created yet.
+- The branch is based on `c466d58` and is 11 commits behind `origin/master` (`2b0831e`). The newest branch tip is `feature/research-quality-evals` at `45bea89`, which adds research-quality task breakdowns on top of the newer master line.
+- The dashboard and worker implementation matches the feature merged into `origin/master`; this branch carries its local verification and dashboard journey tests.
 - Verification in this checkout: `python -m pytest tests -q` -> 45 passed; `npm run test:e2e` -> 4 passed, including dashboard create → plan → execute → inspect. Execution reaches `reviewing` with a draft ready; human review is still required.
-- First follow-up: integrate this checkout with the newer `origin/master`/quality-evaluation line while preserving local edits, then rerun tests. Newer review/release and evaluation implementation must not be counted as present in this older checkout until integrated.
+- First follow-up: reconcile this branch with the newer `origin/master`/quality-evaluation line, then rerun tests. Newer review/release and evaluation implementation must not be counted as present in this older branch until integrated.
 
 ## Completed
 
