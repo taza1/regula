@@ -1,0 +1,8 @@
+
+.build/
+.pytest_cache/
+__pycache__/
+node_modules/
+test-results/
+data/
+live-source-check.cjs

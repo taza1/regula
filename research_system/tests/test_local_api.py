@@ -136,7 +136,7 @@ def test_project_run_and_mock_plan_survive_service_restart(tmp_path, monkeypatch
             json={"approval_id": "APR-NOT-REAL"},
         )
         assert release.status_code == 501
-        assert "not implemented" in release.json()["error"].lower()
+        assert "disabled" in release.json()["error"].lower()
 
 
 def test_http_exception_keeps_404_status(tmp_path, monkeypatch):

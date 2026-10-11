@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Any, TypedDict
 from datetime import datetime
 import asyncio
 import hashlib
+import math
 import re
 import uuid
 from abc import ABC, abstractmethod
@@ -513,30 +514,8 @@ class ApprovalService:
         approver_id: str
     ) -> Optional[ApprovalRecord]:
         """Request approval for a report."""
-        # TODO: Validate run and report
-        # TODO: Verify approver is not the requester (if policy requires)
-        # TODO: Compute approved bundle digest
-        
-        approval = ApprovalRecord(
-            tenant_id=tenant_id,
-            project_id=project_id,
-            run_id=run_id,
-            report_revision=report_revision,
-            approval_id=f"APR-{uuid.uuid4().hex[:8].upper()}",
-            approved_bundle_digest=f"SHA256-{uuid.uuid4().hex[:16].upper()}",
-            approver_id=approver_id,
-            approved_at=datetime.utcnow()
-        )
-        
-        self.store.put(
-            "approval",
-            tenant_id,
-            project_id,
-            approval.approval_id,
-            approval.model_dump(mode="json"),
-        )
-        return approval
-    
+        raise NotImplementedError("Use PublicationService.approve with exact-content review gates and a rationale.")
+
     async def get_approval(
         self,
         tenant_id: str,
@@ -584,74 +563,11 @@ class ReleaseService:
         approval_record: ApprovalRecord
     ) -> Optional[str]:
         """Prepare artifacts for release."""
-        if (
-            approval_record is None
-            or not approval_record.validity
-            or approval_record.tenant_id != tenant_id
-            or approval_record.project_id != project_id
-            or approval_record.run_id != run_id
-            or approval_record.report_revision != report_revision
-        ):
-            return None
-        # TODO: Freeze report, evidence manifest, evaluation results
-        # TODO: Verify manifest signatures
-        # TODO: Upload to private Blob Storage
-        # Returns release ID if successful
-        
-        release_id = f"REL-{uuid.uuid4().hex[:8].upper()}"
-        return release_id
-    
-    async def commit_release(
-        self,
-        tenant_id: str,
-        project_id: str,
-        run_id: str,
-        release_id: str,
-        approval_record: ApprovalRecord
-    ) -> Optional[ReleaseRecord]:
-        """Commit release with ADR-015 invariants."""
-        if not approval_record.validity:
-            return None
-        run_service = ResearchRunService(self.store)
-        run = await run_service.get_run(tenant_id, project_id, run_id)
-        if not run or run.state != RunState.APPROVED:
-            return None
+        raise NotImplementedError("Use PublicationService.release for atomic artifact verification and commit.")
 
-        # TODO: Replace this local sequence with the conditional Cosmos transaction:
-        #   1. Check authorization and project guard version
-        #   2. Check approval still valid
-        #   3. Verify run state is approved
-        #   4. Update run state to released
-        #   5. Create release marker
-        #   6. Record audit and outbox events
-        # TODO: Dispatch outbox to Service Bus
-        # TODO: Handle storage failures and stale approvals
-        
-        release = ReleaseRecord(
-            tenant_id=tenant_id,
-            project_id=project_id,
-            run_id=run_id,
-            report_revision=approval_record.report_revision,
-            release_id=release_id,
-            released_at=datetime.utcnow(),
-            released_by=approval_record.approver_id,
-            approval_reference=approval_record.approval_id,
-            report_blob_url="https://storage.blob.core.windows.net/...",
-            manifest_blob_url="https://storage.blob.core.windows.net/..."
-        )
-        
-        self.store.put(
-            "release", tenant_id, project_id, release_id, release.model_dump(mode="json")
-        )
-        await run_service.update_run_state(
-            tenant_id,
-            project_id,
-            run_id,
-            RunState.RELEASED,
-            revision=approval_record.report_revision,
-        )
-        return release
-    
+    async def commit_release(self, *args, **kwargs):
+        raise NotImplementedError("Use PublicationService.release for atomic artifact verification and commit.")
+
     async def get_release(
         self,
         tenant_id: str,
@@ -749,15 +665,20 @@ class EvidenceService:
                 if isinstance(existing.metadata.get("canonical_source_id"), str)
                 else canonical_source_id(existing)
             )
-        for query in search_queries:
-            if not isinstance(query, str) or not query.strip():
-                continue
+        valid_queries = [
+            query.strip()
+            for query in search_queries
+            if isinstance(query, str) and query.strip()
+        ]
+        for query_index, query in enumerate(valid_queries):
             remaining = total_limit - len(sources)
             if remaining <= 0:
                 break
+            remaining_queries = max(1, len(valid_queries) - query_index)
+            query_limit = max(1, min(remaining, math.ceil(remaining / remaining_queries)))
             discovered = await search_with_outcome(self.connector,
                 query,
-                limit=remaining,
+                limit=query_limit,
                 date_range_start=run.research_request.date_range_start,
                 date_range_end=run.research_request.date_range_end,
             )
@@ -875,7 +796,7 @@ class EvidenceService:
                 source_identity += "|full_text"
             snapshot_id = "SSN-" + _sha256_hex(source_identity)[:16].upper()
             passage_id = "PAS-" + _sha256_hex(
-                f"{snapshot_id}|abstract|0|{content_hash}"
+                f"{snapshot_id}|{section}|{source.metadata.get('extraction_chunk_index', 0)}|{content_hash}"
             )[:16].upper()
             evidence_id = "EVD-" + hashlib.sha256(
                 f"{tenant_id}|{project_id}|{run_id}|{canonical_id}|{passage_id}".encode(
@@ -986,17 +907,23 @@ class EvidenceService:
         config = get_research_config()
         expanded: List[SourceRecord] = []
         for source in sources:
+            retrieval_url = source.metadata.get("full_text_url")
+            if not isinstance(retrieval_url, str) or not retrieval_url.strip():
+                continue
+            retrieval_source = source.model_copy(update={"url": retrieval_url.strip()})
             if not source_passes_governance(
-                source,
+                retrieval_source,
                 approved_domains=run.research_request.approved_source_domains,
                 excluded_domains=run.research_request.excluded_domains,
                 allowed_licenses=config.allowed_source_licenses,
-                require_permissive_license=config.require_permissive_license,
+                # Full-document storage is stricter than metadata/abstract
+                # discovery: an explicit recognized licence is mandatory.
+                require_permissive_license=True,
             ):
                 continue
             document = await asyncio.to_thread(
                 fetch_document,
-                source,
+                retrieval_source,
                 approved_domains=run.research_request.approved_source_domains,
                 excluded_domains=run.research_request.excluded_domains,
                 timeout_seconds=config.openalex_timeout_seconds,
@@ -1319,6 +1246,7 @@ def create_source_connector() -> SourceConnector:
         return OpenAlexConnector(
             base_url=config.openalex_base_url,
             mailto=config.openalex_mailto,
+            api_key=config.openalex_api_key,
             timeout_seconds=config.openalex_timeout_seconds,
             request_interval_seconds=config.openalex_request_interval_seconds,
             latest_query_days=config.latest_query_days,
@@ -1328,6 +1256,7 @@ def create_source_connector() -> SourceConnector:
             OpenAlexConnector(
                 base_url=config.openalex_base_url,
                 mailto=config.openalex_mailto,
+                api_key=config.openalex_api_key,
                 timeout_seconds=config.openalex_timeout_seconds,
                 request_interval_seconds=config.openalex_request_interval_seconds,
                 latest_query_days=config.latest_query_days,
@@ -1340,9 +1269,24 @@ def create_source_connector() -> SourceConnector:
                                  request_interval_seconds=config.crossref_request_interval_seconds)
     if provider == "arxiv":
         return ArxivConnector(base_url=config.arxiv_base_url, timeout_seconds=config.arxiv_timeout_seconds)
+    if provider == "scholarly":
+        return CompositeScholarlyConnector((
+            OpenAlexConnector(base_url=config.openalex_base_url, mailto=config.openalex_mailto,
+                              api_key=config.openalex_api_key,
+                              timeout_seconds=config.openalex_timeout_seconds,
+                              latest_query_days=config.latest_query_days,
+                              request_interval_seconds=config.openalex_request_interval_seconds),
+            CrossrefConnector(base_url=config.crossref_base_url, mailto=config.crossref_mailto,
+                              timeout_seconds=config.crossref_timeout_seconds,
+                              latest_query_days=config.latest_query_days,
+                              request_interval_seconds=config.crossref_request_interval_seconds),
+            ArxivConnector(base_url=config.arxiv_base_url, timeout_seconds=config.arxiv_timeout_seconds,
+                           request_interval_seconds=config.arxiv_request_interval_seconds),
+        ))
     if provider == "scholarly_with_local_fallback":
         return FallbackSourceConnector(CompositeScholarlyConnector((
             OpenAlexConnector(base_url=config.openalex_base_url, mailto=config.openalex_mailto,
+                              api_key=config.openalex_api_key,
                               timeout_seconds=config.openalex_timeout_seconds,
                               latest_query_days=config.latest_query_days,
                               request_interval_seconds=config.openalex_request_interval_seconds),
@@ -1354,5 +1298,5 @@ def create_source_connector() -> SourceConnector:
                            request_interval_seconds=config.arxiv_request_interval_seconds),
         )))
     raise ValueError(
-        "SOURCE_CONNECTOR must be one of: local, openalex, crossref, arxiv, scholarly_with_local_fallback, openalex_with_local_fallback"
+        "SOURCE_CONNECTOR must be one of: local, openalex, crossref, arxiv, scholarly, scholarly_with_local_fallback, openalex_with_local_fallback"
     )

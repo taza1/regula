@@ -108,11 +108,11 @@ def test_arxiv_applies_date_query_sorting_and_rejects_bad_xml(monkeypatch):
     monkeypatch.setattr("src.source_connectors.requests.get", fake_get)
     with pytest.raises(ValueError, match="Invalid arXiv XML"):
         ArxivConnector(request_interval_seconds=0).search_sync(
-            "latest AI", limit=2,
+            "AI methods", limit=2,
             date_range_start=datetime(2026, 1, 1), date_range_end=datetime(2026, 9, 1),
         )
     assert "submittedDate:[202601010000 TO 202609012359]" in captured["search_query"]
-    assert captured["sortBy"] == "submittedDate"
+    assert captured["sortBy"] == "relevance"
     assert captured["sortOrder"] == "descending"
 
 

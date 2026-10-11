@@ -62,6 +62,19 @@ async function results() {
   document.querySelectorAll('[data-run]').forEach(button => { button.classList.toggle('active', button.dataset.run === state.run); if (button.dataset.run === state.run) button.querySelector('small').textContent = label(data.run.state); });
 }
 function controls(run, job) {
+  const roles = state.projects.find(p => p.project_id === state.project)?.members?.[identity.user] || [];
+  const reviewer = roles.some(r => ['reviewer','admin'].includes(r));
+  const publisher = roles.some(r => ['publisher','admin'].includes(r));
+  const result = state.result || {};
+  $('review-button').hidden = run.state !== 'reviewing' || !reviewer;
+  $('review-button').disabled = state.busy;
+  $('approval-form').hidden = run.state !== 'awaiting_approval' || !reviewer || !result.release_enabled;
+  $('release-button').hidden = run.state !== 'approved' || !publisher || !result.release_enabled;
+  $('release-button').disabled = state.busy;
+  const review = result.model_review;
+  $('review-summary').textContent = review ? (review.passed ? 'Model review passed. Human approval is required.' : 'Blocked: ' + review.blockers.join(' ')) : 'Model review has not run.';
+  $('release-links').textContent = result.release ? 'Released: ' + result.release.release_id : '';
+
   const pending = run.state === 'awaiting_scope_confirmation';
   const reserved = job && ['queued','running'].includes(job.status);
   $('plan-button').hidden = !pending || !!run.research_plan;
@@ -133,3 +146,7 @@ async function boot() {
   setInterval(async () => { if (state.busy || !state.run || document.hidden) return; try { await results(); } catch (error) { notice('Could not refresh: ' + error.message); } }, 1500);
 }
 boot();
+
+$('review-button').onclick = () => action(async () => { await api(runPath() + '/review', 'POST'); await results(); });
+$('approval-form').onsubmit = event => { event.preventDefault(); action(async () => { await api(runPath() + '/request-approval', 'POST', {approval_rationale: $('approval-rationale').value}); await results(); }); };
+$('release-button').onclick = () => action(async () => { if (!confirm('Publish the exact approved report for this project?')) return; await api(runPath() + '/release', 'POST', {approval_id: state.result.approval.approval_id}); await results(); });

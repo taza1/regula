@@ -1,12 +1,12 @@
 # Project Roadmap
 
-## Current checkout status (2026-10-11)
+## Current status (2026-10-11)
 
-- This checkout is `feature/research-dashboard-execution` at `31b70fa`, pushed to `origin/feature/research-dashboard-execution`. No pull request has been created yet.
-- The branch is based on `c466d58` and is 11 commits behind `origin/master` (`2b0831e`). The newest branch tip is `feature/research-quality-evals` at `45bea89`, which adds research-quality task breakdowns on top of the newer master line.
-- The dashboard and worker implementation matches the feature merged into `origin/master`; this branch carries its local verification and dashboard journey tests.
-- Verification in this checkout: `python -m pytest tests -q` -> 45 passed; `npm run test:e2e` -> 4 passed, including dashboard create → plan → execute → inspect. Execution reaches `reviewing` with a draft ready; human review is still required.
-- First follow-up: reconcile this branch with the newer `origin/master`/quality-evaluation line, then rerun tests. Newer review/release and evaluation implementation must not be counted as present in this older branch until integrated.
+- The dashboard and durable local execution queue are implemented and verified in the current branch.
+- Local verification: `python -m pytest tests -q` -> 66 passed; `npm run test:e2e` -> 4 passed, 1 live Foundry test skipped because remote credentials were not configured.
+- Dashboard browser coverage exercises project creation, planning, execution, and draft/evidence inspection. A successful local run stops in `reviewing`; human review remains required.
+- The newer task breakdown is on `feature/research-quality-evals` at `45bea89`; its detailed task documents are not yet integrated here.
+- See [Project completion plan](docs/PROJECT_COMPLETION_PLAN.md) and [review/release status](docs/REVIEW_RELEASE_STATUS.md) for production boundaries and delivery steps.
 
 ## Completed
 
@@ -46,32 +46,29 @@
 - [x] Add SQLite FTS5 search with BM25 ranking and scoped eligibility filters
 - [ ] Add embeddings and vector retrieval
 - [ ] Add Azure AI Search adapter
-- [x] Implement durable local background run workers
-- [x] Add research workspace dashboard for planning, execution, polling, and result inspection
+- [x] Implement background run workers
+- [x] Add research workspace dashboard and durable execution queue
 - [x] Generate deterministic local claim ledger and draft skeleton
-- [ ] Generate reviewed evidence-backed reports
+- [x] Generate evidence-backed drafts with semantic fact-check and critical review gates (local prototype; model review still needs evaluation)
 - [ ] Add contradictory-evidence searches
 
 ## Review, security, and operations
 
 - [x] Implement deterministic local citation-integrity validation and persisted findings
-- [ ] Implement independent semantic fact-checking and release-blocking citation gates
-- [ ] Add critical review and prompt-injection checks
-- [ ] Replace development-header identity with production Entra authentication and role mapping
-- [ ] Complete approval and release workflows
+- [x] Implement semantic fact-checking, critical review, prompt-injection checks, and release-blocking review gates (same configured model; independent model verification remains open)
+- [x] Add authenticated API identity and role enforcement (browser SSO remains open)
+- [x] Complete local approval and release workflows (production release remains disabled by default)
 - [ ] Add Cosmos DB, Blob Storage, Service Bus, and Key Vault deployment
 - [ ] Add monitoring, audit events, and production deployment
 
-## Remaining quality and integration work
+## Remaining quality and production work
 
-- [ ] Integrate the newer master and `feature/research-quality-evals` work into this checkout without losing local changes.
-- [ ] Expand and run the retrieval evaluation gold set; measure relevance, date accuracy, provider failures, duplicates, source independence, and contradiction discovery.
-- [ ] Expand and run model/review evaluations for unsupported claims, conflicts, stale evidence, prompt injection, and failure recovery; define release-blocking thresholds.
-- [ ] Complete governed licensed full-text retrieval, including licence metadata, source provenance, coverage tests, and abstract-versus-full-text comparisons.
-- [ ] Run the guarded live Playwright flow with real scholarly providers and the selected remote model; retain redacted evidence and confirm it stops before approval or release.
-- [ ] Deploy and validate the hosted Foundry agent, if selected, including identity, endpoint access, budget, and browser-level behavior.
-- [ ] Replace SQLite and the local worker with production Cosmos/Blob/Search/Service Bus adapters; add hosting, secrets, telemetry, backup/restore, and rollback procedures.
-- [ ] Verify the latest hosted CI checks after branch integration.
+- [ ] Expand and run retrieval evaluations for relevance, date handling, provider outages, duplicates, source independence, and contradictory evidence; set held-out acceptance thresholds.
+- [ ] Expand and run model/review evaluations for unsupported claims, conflicts, stale sources, prompt injection, and failure recovery; include repeated runs and release-blocking criteria.
+- [ ] Complete governed full-text retrieval with licence evidence, provenance, coverage checks, and abstract-versus-full-text comparisons.
+- [ ] Run the guarded live Playwright workflow with real scholarly providers and the selected remote model; retain redacted evidence and verify it stops before approval/release.
+- [ ] Deploy and validate the hosted Foundry agent if selected, including identity, endpoint access, cost limits, and browser-level behavior.
+- [ ] Replace local SQLite persistence and workers with production Cosmos/Blob/Search/Service Bus adapters; add API hosting, secret delivery, monitoring, backup/restore, and rollback.
 
 ## Audit follow-up backlog (2026-09-12)
 
@@ -81,7 +78,7 @@ Acceptance criteria and parent task mappings: [Hardening backlog](docs/HARDENING
 - [x] HARD-002 (P1): Report provider failures and partial results explicitly.
 - [x] HARD-003 (P1): Fix arXiv date-filtered recency retrieval and bounded pagination.
 - [x] HARD-004 (P1): Enforce snapshot immutability with atomic persistence and retry tests.
-- [x] HARD-005 (P1): Add research-system Python and Playwright CI workflow (hosted run pending push).
+- [x] HARD-005 (P1): Add research-system Python and Playwright CI workflow; verify the hosted PR run.
 - [x] HARD-006 (P2): Refresh Azure plan and completion labels against verified code.
 
 ## Definition of done for the next release

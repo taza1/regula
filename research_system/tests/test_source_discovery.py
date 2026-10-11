@@ -2,12 +2,14 @@
 
 import pytest
 
+from src.config import get_research_config
 from src.local_store import LocalStateStore
 from src.models import PeerReviewStatus, ResearchRequest, SourceType
-from src.services import EvidenceService, ResearchRunService, source_passes_governance
-from src.evidence_extraction import ExtractionError, chunk_text, fetch_document
+from src.services import EvidenceService, ResearchRunService, create_source_connector, source_passes_governance
+from src.evidence_extraction import ExtractedDocument, ExtractionError, chunk_text, fetch_document
 from src.source_connectors import (
     ArxivConnector,
+    CompositeScholarlyConnector,
     CrossrefConnector,
     LocalSourceConnector,
     OpenAlexConnector,
@@ -164,6 +166,55 @@ async def test_discovery_deduplicates_sources_by_doi(tmp_path):
     assert result["sources"][0].metadata["canonical_source_id"].startswith("CAN-DOI-")
 
 
+@pytest.mark.asyncio
+async def test_discovery_spreads_source_budget_across_planner_queries(tmp_path):
+    class QueryTrackingConnector:
+        name = "query-tracking"
+
+        def __init__(self):
+            self.queries = []
+
+        async def search(self, query, *, limit=20, date_range_start=None, date_range_end=None):
+            self.queries.append((query, limit))
+            return [
+                SourceRecord(
+                    source_id=f"SRC-{len(self.queries)}",
+                    connector=self.name,
+                    title=f"Source for {query}",
+                    url=f"https://example.test/{len(self.queries)}",
+                    source_type=SourceType.PAPER,
+                    abstract=f"Evidence passage for {query}.",
+                    peer_review_status=PeerReviewStatus.UNKNOWN,
+                )
+            ]
+
+    store = LocalStateStore(str(tmp_path / "query-budget.db"))
+    run_service = ResearchRunService(store)
+    run = await run_service.create_run(
+        "TEN-1",
+        "PRJ-1",
+        ResearchRequest(
+            title="Query budget test",
+            primary_question="Does discovery reach later queries?",
+            scope_description="Budget",
+            max_sources=2,
+        ),
+    )
+    connector = QueryTrackingConnector()
+    service = EvidenceService(store, connector=connector)
+
+    result = await service.discover_and_ingest_plan(
+        "TEN-1", "PRJ-1", run.run_id,
+        {"search_queries": ["benefit query", "failure query", "limitation query"]},
+    )
+
+    assert [query for query, _ in connector.queries] == ["benefit query", "failure query"]
+    assert [source.title for source in result["sources"]] == [
+        "Source for benefit query",
+        "Source for failure query",
+    ]
+
+
 def test_openalex_connector_maps_work_to_source(monkeypatch):
     captured = {}
 
@@ -213,13 +264,15 @@ def test_openalex_connector_maps_work_to_source(monkeypatch):
     connector = OpenAlexConnector(
         base_url="https://api.openalex.org",
         mailto="researcher@example.test",
+        api_key="free-test-key",
         latest_query_days=90,
     )
 
     sources = connector.search_sync("latest on AI", limit=5)
 
     assert captured["url"] == "https://api.openalex.org/works"
-    assert captured["params"]["search"] == "latest on AI"
+    assert captured["params"]["search"] == "ai"
+    assert captured["params"]["api_key"] == "free-test-key"
     assert captured["params"]["sort"] == "publication_date:desc"
     assert "from_publication_date:" in captured["params"]["filter"]
     assert sources[0].connector == "openalex"
@@ -229,6 +282,29 @@ def test_openalex_connector_maps_work_to_source(monkeypatch):
     assert sources[0].authors == ["Ada Lovelace", "Grace Hopper"]
     assert sources[0].passage == "AI agents coordinate tools"
     assert sources[0].metadata["source_display_name"] == "Journal of AI"
+
+
+def test_openalex_metadata_without_abstract_does_not_create_placeholder_evidence(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": [{
+                    "id": "https://openalex.org/WNOABSTRACT",
+                    "display_name": "Metadata only work",
+                    "type": "article",
+                    "publication_date": "2026-08-15",
+                }]
+            }
+
+    monkeypatch.setattr("src.source_connectors.requests.get", lambda *args, **kwargs: Response())
+
+    sources = OpenAlexConnector(request_interval_seconds=0).search_sync("metadata only", limit=1)
+
+    assert sources[0].abstract == ""
+    assert sources[0].passage == ""
 
 
 def test_crossref_connector_maps_work_and_filters(monkeypatch):
@@ -260,12 +336,44 @@ def test_crossref_connector_maps_work_and_filters(monkeypatch):
     )
     assert captured["url"].endswith("/works")
     assert captured["params"] == {
-        "query": "methods", "rows": 3, "mailto": "researcher@example.test",
+        "query.bibliographic": "methods", "rows": 3, "mailto": "researcher@example.test",
         "filter": "from-pub-date:2026-01-01,until-pub-date:2026-12-31",
     }
     assert result[0].abstract == "Useful & clear."
     assert result[0].authors == ["Ada Lovelace"]
-    assert result[0].peer_review_status == PeerReviewStatus.PEER_REVIEWED
+    assert result[0].peer_review_status == PeerReviewStatus.UNKNOWN
+
+
+def test_crossref_metadata_without_abstract_does_not_create_placeholder_evidence(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"items": [{
+                "DOI": "10.1234/no-abstract",
+                "URL": "https://doi.org/10.1234/no-abstract",
+                "title": ["Metadata only Crossref record"],
+                "type": "journal-article",
+            }]}}
+
+    monkeypatch.setattr("src.source_connectors.requests.get", lambda *args, **kwargs: Response())
+
+    sources = CrossrefConnector(request_interval_seconds=0).search_sync("metadata only", limit=1)
+
+    assert sources[0].abstract == ""
+    assert sources[0].passage == ""
+
+
+def test_scholarly_connector_uses_remote_providers_without_local_fallback(monkeypatch):
+    monkeypatch.setenv("SOURCE_CONNECTOR", "scholarly")
+    get_research_config.cache_clear()
+    try:
+        connector = create_source_connector()
+    finally:
+        get_research_config.cache_clear()
+
+    assert isinstance(connector, CompositeScholarlyConnector)
 
 
 def test_arxiv_connector_maps_and_filters_atom(monkeypatch):
@@ -294,6 +402,41 @@ def test_arxiv_connector_maps_and_filters_atom(monkeypatch):
     assert result[0].doi == "10.48550/arXiv.2401.12345"
     assert result[0].authors == ["Ada Lovelace"]
     assert result[0].metadata["pdf_url"].endswith(".pdf")
+
+
+def test_arxiv_query_requires_each_content_term_and_reranks(monkeypatch):
+    captured = {}
+
+    class Response:
+        text = """<feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><id>http://arxiv.org/abs/2401.00001</id>
+          <title>Image generation with retrieval</title>
+          <summary>Retrieval augmented generation for images.</summary>
+          <published>2025-01-01T00:00:00Z</published></entry>
+          <entry><id>http://arxiv.org/abs/2401.00002</id>
+          <title>Retrieval augmented generation in healthcare</title>
+          <summary>Clinical healthcare question answering with grounded retrieval.</summary>
+          <published>2025-01-02T00:00:00Z</published></entry>
+          </feed>"""
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, params, timeout, headers):
+        captured.update(params)
+        return Response()
+
+    monkeypatch.setattr("src.source_connectors.requests.get", fake_get)
+    result = ArxivConnector(request_interval_seconds=0, max_pages=1).search_sync(
+        "What does research say about retrieval augmented generation healthcare?", limit=1
+    )
+
+    assert captured["search_query"] == (
+        "all:retrieval AND all:augmented AND all:generation AND all:healthcare"
+    )
+    assert captured["max_results"] == 3
+    assert result[0].title == "Retrieval augmented generation in healthcare"
+    assert result[0].metadata["local_relevance_score"] > 0
 
 
 def test_source_governance_enforces_domains_and_licenses():
@@ -355,6 +498,44 @@ def test_document_policy_rejects_unapproved_url():
         allowed_licenses=["cc0"],
         require_permissive_license=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_full_text_requires_license_and_uses_provider_document_url(tmp_path, monkeypatch):
+    store = LocalStateStore(str(tmp_path / "full-text.db"))
+    run = await ResearchRunService(store).create_run(
+        "TEN-1", "PRJ-1", ResearchRequest(
+            title="Licensed documents",
+            primary_question="What does the paper report?",
+            scope_description="Open papers",
+            approved_source_domains=["papers.example.org"],
+        )
+    )
+    fetched = []
+
+    def fake_fetch(source, **kwargs):
+        fetched.append(source.url)
+        return ExtractedDocument(
+            url=source.url,
+            media_type="application/pdf",
+            text="A licensed full-text result with sufficient content for one passage.",
+            content_hash="abc123",
+        )
+
+    monkeypatch.setattr("src.services.fetch_document", fake_fetch)
+    allowed = SourceRecord(
+        source_id="FULL-1", connector="test", title="Licensed", url="https://metadata.example.org/1",
+        license="https://creativecommons.org/licenses/by/4.0/",
+        metadata={"full_text_url": "https://papers.example.org/1.pdf"},
+        tenant_id="TEN-1", project_id="PRJ-1", run_id=run.run_id,
+    )
+    unlicensed = allowed.model_copy(update={"source_id": "FULL-2", "license": None})
+    evidence = await EvidenceService(store).ingest_full_sources(
+        "TEN-1", "PRJ-1", run.run_id, [allowed, unlicensed]
+    )
+
+    assert fetched == ["https://papers.example.org/1.pdf"]
+    assert evidence and all(item.section == "full_text" for item in evidence)
 
 
 @pytest.mark.asyncio

@@ -95,7 +95,8 @@ class ExecutionQueue:
 
 
 class LocalResearchWorker:
-    def __init__(self, queue, evidence_service):
+    def __init__(self, queue, evidence_service, model_client=None):
+        self.model_client = model_client
         self.queue = queue
         self.store = queue.store
         self.evidence = evidence_service
@@ -174,6 +175,14 @@ class LocalResearchWorker:
         await self.checkpoint(job, 'synthesis', 'Preparing the cited draft.')
         if not await self.runs.update_run_state(*key, RunState.SYNTHESIZING, expected_state=RunState.COLLECTING):
             raise asyncio.CancelledError()
+        if self.model_client and self.model_client.provider != 'mock':
+            from src.review_pipeline import ReviewPipeline
+            await self.checkpoint(job, 'model_review', 'Synthesizing, fact-checking, and critically reviewing evidence.')
+            review = await ReviewPipeline(self.store, self.model_client).execute(*key)
+            job['review_passed'] = review['passed']
+            await self.finish(job, 'completed', 'Review complete. Human approval required.' if review['passed']
+                              else 'Review found blocking issues. Human adjudication required.')
+            return
         result = await SynthesisService(self.store).synthesize_local(*key)
         if not result:
             await self.runs.update_run_state(*key, RunState.INSUFFICIENT_EVIDENCE, expected_state=RunState.SYNTHESIZING)
