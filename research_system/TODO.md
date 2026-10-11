@@ -1,5 +1,13 @@
 # Project Roadmap
 
+## Current checkout status (2026-10-11)
+
+- This checkout is `feature/research-dashboard-execution` at `c466d58`; it is 11 commits behind `origin/master` (`2b0831e`).
+- The newest branch tip is `feature/research-quality-evals` at `45bea89`. It adds the latest research-quality task breakdown on top of the newer master line.
+- The uncommitted dashboard and worker files here match the implementation merged into `origin/master`. The local dashboard journey was verified in Playwright; Python tests passed.
+- Verification in this checkout: `python -m pytest tests -q` -> 45 passed; `npm run test:e2e` -> 4 passed, including dashboard create → plan → execute → inspect. Execution reaches `reviewing` with a draft ready; human review is still required.
+- First follow-up: integrate this checkout with the newer `origin/master`/quality-evaluation line while preserving local edits, then rerun tests. Newer review/release and evaluation implementation must not be counted as present in this older checkout until integrated.
+
 ## Completed
 
 - [x] Create FastAPI application and Swagger documentation
@@ -38,7 +46,8 @@
 - [x] Add SQLite FTS5 search with BM25 ranking and scoped eligibility filters
 - [ ] Add embeddings and vector retrieval
 - [ ] Add Azure AI Search adapter
-- [ ] Implement background run workers
+- [x] Implement durable local background run workers
+- [x] Add research workspace dashboard for planning, execution, polling, and result inspection
 - [x] Generate deterministic local claim ledger and draft skeleton
 - [ ] Generate reviewed evidence-backed reports
 - [ ] Add contradictory-evidence searches
@@ -48,10 +57,21 @@
 - [x] Implement deterministic local citation-integrity validation and persisted findings
 - [ ] Implement independent semantic fact-checking and release-blocking citation gates
 - [ ] Add critical review and prompt-injection checks
-- [ ] Add authenticated identity and role enforcement
+- [ ] Replace development-header identity with production Entra authentication and role mapping
 - [ ] Complete approval and release workflows
 - [ ] Add Cosmos DB, Blob Storage, Service Bus, and Key Vault deployment
 - [ ] Add monitoring, audit events, and production deployment
+
+## Remaining quality and integration work
+
+- [ ] Integrate the newer master and `feature/research-quality-evals` work into this checkout without losing local changes.
+- [ ] Expand and run the retrieval evaluation gold set; measure relevance, date accuracy, provider failures, duplicates, source independence, and contradiction discovery.
+- [ ] Expand and run model/review evaluations for unsupported claims, conflicts, stale evidence, prompt injection, and failure recovery; define release-blocking thresholds.
+- [ ] Complete governed licensed full-text retrieval, including licence metadata, source provenance, coverage tests, and abstract-versus-full-text comparisons.
+- [ ] Run the guarded live Playwright flow with real scholarly providers and the selected remote model; retain redacted evidence and confirm it stops before approval or release.
+- [ ] Deploy and validate the hosted Foundry agent, if selected, including identity, endpoint access, budget, and browser-level behavior.
+- [ ] Replace SQLite and the local worker with production Cosmos/Blob/Search/Service Bus adapters; add hosting, secrets, telemetry, backup/restore, and rollback procedures.
+- [ ] Verify the latest hosted CI checks after branch integration.
 
 ## Audit follow-up backlog (2026-09-12)
 
