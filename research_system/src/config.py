@@ -135,8 +135,8 @@ class ResearchConfig(BaseSettings):
     arxiv_request_interval_seconds: float = Field(default=3.0, ge=0, description="Minimum delay between arXiv requests")
     source_policy_version: str = Field(default="SOURCE-POLICY-1", description="Source governance policy version")
     allowed_source_licenses: List[str] = Field(
-        default=["cc-by", "cc0", "public domain", "open access", "arxiv"],
-        description="Case-insensitive license labels or URL fragments permitted for extraction",
+        default=["cc-by", "cc0"],
+        description="Explicit SPDX-style IDs or recognized Creative Commons licence URLs permitted for extraction",
     )
     require_permissive_license: bool = Field(
         default=False,

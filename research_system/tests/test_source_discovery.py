@@ -113,6 +113,30 @@ async def test_discovery_rejects_missing_or_cross_scope_runs(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_discovery_adds_bounded_counter_evidence_query_and_labels_source(tmp_path):
+    class QueryConnector:
+        name = "capture"
+        queries = []
+        async def search(self, query, *, limit=20, date_range_start=None, date_range_end=None):
+            self.queries.append(query)
+            return [SourceRecord(source_id=f"S-{len(self.queries)}", connector=self.name,
+                title=f"Treatment outcome evidence {('primary' if len(self.queries) == 1 else 'counter')}", url="https://papers.example/evidence",
+                abstract="Treatment outcome evidence", passage="Treatment outcome evidence",
+                published_at=__import__("datetime").datetime(2025, 1, 1), authors=["Team"])]
+
+    store = LocalStateStore(str(tmp_path / "counter-evidence.db"))
+    run = await ResearchRunService(store).create_run("TEN", "PRJ", ResearchRequest(
+        title="Counter evidence", primary_question="Does it work?", scope_description="Bounded",
+        max_sources=2,
+    ))
+    connector = QueryConnector()
+    sources = await EvidenceService(store, connector).discover_sources("TEN", "PRJ", run.run_id, ["treatment outcome"])
+    assert len(connector.queries) == 2
+    assert "no effect" in connector.queries[1] and "failed to replicate" in connector.queries[1]
+    assert [source.metadata["discovery_query_type"] for source in sources] == ["primary", "counter_evidence"]
+
+
+@pytest.mark.asyncio
 async def test_discovery_deduplicates_sources_by_doi(tmp_path):
     class DuplicateConnector:
         name = "duplicate"
@@ -456,6 +480,8 @@ def test_source_governance_enforces_domains_and_licenses():
     assert not source_passes_governance(
         source, excluded_domains=["papers.example.org"], allowed_licenses=["cc-by"]
     )
+    vague = source.model_copy(update={"license": "open access"})
+    assert not source_passes_governance(vague, allowed_licenses=["open access"], require_permissive_license=True)
 
 
 def test_html_extraction_and_chunk_deduplication(monkeypatch):
@@ -536,6 +562,8 @@ async def test_full_text_requires_license_and_uses_provider_document_url(tmp_pat
 
     assert fetched == ["https://papers.example.org/1.pdf"]
     assert evidence and all(item.section == "full_text" for item in evidence)
+    assert evidence[0].url == "https://papers.example.org/1.pdf"
+    assert store.list("source_snapshot", "TEN-1", "PRJ-1", limit=10)[0]["license"] == allowed.license
 
 
 @pytest.mark.asyncio

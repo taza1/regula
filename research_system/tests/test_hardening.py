@@ -39,11 +39,9 @@ async def test_composite_reports_partial_provider_failure_and_interleaves():
     ))
     result = await connector.search("query", limit=3)
     assert [item.source_id for item in result] == ["1", "3", "2"]
-    assert result.outcomes == [
-        {"provider": "first", "status": "success"},
-        {"provider": "failed", "status": "timeout"},
-        {"provider": "third", "status": "success"},
-    ]
+    assert [item["status"] for item in result.outcomes[:3]] == ["success", "timeout", "success"]
+    assert result.outcomes[0]["result_count"] == 2
+    assert result.outcomes[-1]["duplicate_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -52,10 +50,8 @@ async def test_composite_distinguishes_empty_results_from_provider_failure():
         FakeConnector("empty"), FakeConnector("failed", error=RuntimeError("offline")),
     )).search("query")
     assert result == []
-    assert result.outcomes == [
-        {"provider": "empty", "status": "empty"},
-        {"provider": "failed", "status": "failed"},
-    ]
+    assert [item["status"] for item in result.outcomes[:2]] == ["empty", "failed"]
+    assert result.outcomes[-1]["status"] == "empty"
 
 
 def test_connector_retries_rate_limit_then_succeeds(monkeypatch):
@@ -88,7 +84,8 @@ async def test_fallback_is_explicitly_labeled():
     result = await connector.search("unmatched topic", limit=1)
     assert result[0].metadata["fallback"] is True
     assert result[0].metadata["synthetic"] is True
-    assert result.outcomes[0] == {"provider": "remote", "status": "failed"}
+    assert result.outcomes[0]["provider"] == "remote"
+    assert result.outcomes[0]["status"] == "failed"
     assert result.outcomes[1]["fallback"] is True
 
 

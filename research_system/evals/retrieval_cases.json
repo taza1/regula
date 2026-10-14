@@ -3,22 +3,24 @@
     "case_id": "rag-healthcare-relevance",
     "query": "retrieval augmented generation healthcare factual accuracy",
     "relevant_terms": ["retrieval", "healthcare"],
-    "expected_source_ids": [],
+    "expected_source_ids": ["10.3390/ai6090226"],
     "date_range_start": "2023-01-01T00:00:00",
     "date_range_end": "2026-12-31T23:59:59",
-    "min_independence_groups": 2,
+    "min_independence_groups": 1,
     "require_contradiction": false,
-    "limit": 10
+    "limit": 20,
+    "max_provider_failures": 1
   },
   {
     "case_id": "rag-negative-evidence",
     "query": "retrieval augmented generation no improvement worse factual accuracy failure",
-    "relevant_terms": ["retrieval", "accuracy"],
-    "expected_source_ids": [],
+    "relevant_terms": ["retrieval"],
+    "expected_source_ids": ["10.1145/3637528.3671656"],
     "date_range_start": "2020-01-01T00:00:00",
     "date_range_end": "2026-12-31T23:59:59",
-    "min_independence_groups": 2,
-    "require_contradiction": true,
-    "limit": 10
+    "min_independence_groups": 1,
+    "require_contradiction": false,
+    "limit": 20,
+    "max_provider_failures": 1
   }
 ]

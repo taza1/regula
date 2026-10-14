@@ -52,5 +52,14 @@
     "claims": [{"claim_id": "C1", "text": "All trials show that the treatment improves the outcome.", "evidence_ids": ["E1", "E2"]}],
     "expected_verdicts": {"C1": "contradicted"},
     "required_blocker_terms": ["contradict"]
+  },
+  {
+    "case_id": "transient-failure-recovery",
+    "dimension": "failure_recovery",
+    "question": "What does the evidence support?",
+    "evidence": [{"evidence_id": "E1", "passage": "No outcome data were reported.", "published_at": "2025-01-01"}],
+    "claims": [{"claim_id": "C1", "text": "The intervention improved outcomes.", "evidence_ids": ["E1"]}],
+    "expected_verdicts": {"C1": "insufficient_evidence"},
+    "required_blocker_terms": []
   }
 ]

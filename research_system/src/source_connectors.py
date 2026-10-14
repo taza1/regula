@@ -35,23 +35,31 @@ _LAST_REQUEST_BY_DOMAIN: dict[str, float] = {}
 class SourceResults(list):
     """List-compatible results with per-request provider outcomes (no shared state)."""
 
-    def __init__(self, values=(), outcomes=()):
+    def __init__(self, values=(), outcomes=(), *, candidate_count=None, duplicate_count=0):
         super().__init__(values)
         self.outcomes = list(outcomes)
+        self.candidate_count = len(self) if candidate_count is None else int(candidate_count)
+        self.duplicate_count = int(duplicate_count)
 
 
 async def search_with_outcome(connector, query, **kwargs):
+    started = time.monotonic()
     try:
         results = await connector.search(query, **kwargs)
+        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
         if isinstance(results, SourceResults):
             return results
         return SourceResults(results, [{"provider": connector.name,
-                                       "status": "success" if results else "empty"}])
+                                       "status": "success" if results else "empty",
+                                       "result_count": len(results),
+                                       "latency_ms": elapsed_ms}])
     except Exception as exc:
+        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
         status = "timeout" if isinstance(exc, (requests.Timeout, TimeoutError)) else "failed"
         if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code == 429:
             status = "rate_limited"
-        return SourceResults(outcomes=[{"provider": connector.name, "status": status}])
+        return SourceResults(outcomes=[{"provider": connector.name, "status": status,
+                                        "latency_ms": elapsed_ms}])
 
 
 def _request_with_retry(
@@ -303,9 +311,9 @@ class OpenAlexConnector:
         )
         source_id = "OPENALEX-" + _stable_id(openalex_id)
         authors = [
-            str(author.get("author", {}).get("display_name")).strip()
+            str((author.get("author") or {}).get("display_name")).strip()
             for author in item.get("authorships", [])
-            if author.get("author", {}).get("display_name")
+            if (author.get("author") or {}).get("display_name")
         ]
         return SourceRecord(
             source_id=source_id,
@@ -326,9 +334,9 @@ class OpenAlexConnector:
                 "work_type": item.get("type"),
                 "source_display_name": (
                     (item.get("primary_location") or {})
-                    .get("source", {})
-                    .get("display_name")
-                )
+                    .get("source")
+                    or {}
+                ).get("display_name")
                 or host_venue.get("display_name"),
                 "is_retracted": item.get("is_retracted"),
                 "open_access": item.get("open_access"),
@@ -533,9 +541,19 @@ class CompositeScholarlyConnector:
             connector, query, limit=limit, date_range_start=date_range_start,
             date_range_end=date_range_end) for connector in self.connectors))
         interleaved = [item for row in zip_longest(*batches) for item in row if item is not None]
-        ranked = rank_sources(deduplicate_sources(interleaved), query)
-        return SourceResults(ranked[:max(0, int(limit))],
-                             [outcome for batch in batches for outcome in batch.outcomes])
+        unique = deduplicate_sources(interleaved)
+        duplicate_count = len(interleaved) - len(unique)
+        ranked = rank_sources(unique, query)
+        outcomes = [outcome for batch in batches for outcome in batch.outcomes]
+        outcomes.append({
+            "provider": self.name,
+            "status": "success" if unique else "empty",
+            "candidate_count": len(interleaved),
+            "unique_count": len(unique),
+            "duplicate_count": duplicate_count,
+        })
+        return SourceResults(ranked[:max(0, int(limit))], outcomes,
+                             candidate_count=len(interleaved), duplicate_count=duplicate_count)
 
 
 def deduplicate_sources(sources):
