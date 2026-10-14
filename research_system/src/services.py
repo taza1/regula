@@ -100,17 +100,20 @@ def source_passes_governance(
         return False
     if approved and not any(_domain_matches(hostname, item) for item in approved):
         return False
-    license_value = (source.license or "").casefold()
-    allowed = [item.casefold().strip() for item in (allowed_licenses or []) if item.strip()]
+    license_value = (source.license or "").casefold().strip().rstrip("/")
+    allowed = [item.casefold().strip().rstrip("/") for item in (allowed_licenses or []) if item.strip()]
     if require_permissive_license and not license_value:
         return False
     normalized_license = license_value.replace("_", "-")
-    license_matches = any(item in normalized_license for item in allowed)
-    if "cc-by" in allowed and "creativecommons.org/licenses/by" in normalized_license:
-        license_matches = True
-    if "cc0" in allowed and "creativecommons.org/publicdomain/zero" in normalized_license:
-        license_matches = True
-    if license_value and allowed and not license_matches:
+    if normalized_license in {"open access", "arxiv", "public domain", "oa"}:
+        return False
+    license_matches = normalized_license in {item.replace("_", "-") for item in allowed}
+    license_matches = license_matches or any(
+        item == "cc-by" and bool(re.fullmatch(r"https?://creativecommons\.org/licenses/by/(?:[1-4](?:\.0)?|4\.0)/?(?:deed\.[a-z-]+)?", normalized_license))
+        or item == "cc0" and bool(re.fullmatch(r"https?://creativecommons\.org/publicdomain/zero/(?:1\.0/)?(?:deed\.[a-z-]+)?", normalized_license))
+        for item in allowed
+    )
+    if license_value and (not allowed or not license_matches):
         return False
     return True
 
@@ -670,11 +673,14 @@ class EvidenceService:
             for query in search_queries
             if isinstance(query, str) and query.strip()
         ]
-        for query_index, query in enumerate(valid_queries):
+        query_plan = [(query, "primary") for query in valid_queries]
+        for query in valid_queries:
+            query_plan.append((f'{query} ("no effect" OR "no improvement" OR null OR "failed to replicate")', "counter_evidence"))
+        for query_index, (query, query_type) in enumerate(query_plan):
             remaining = total_limit - len(sources)
             if remaining <= 0:
                 break
-            remaining_queries = max(1, len(valid_queries) - query_index)
+            remaining_queries = max(1, len(query_plan) - query_index)
             query_limit = max(1, min(remaining, math.ceil(remaining / remaining_queries)))
             discovered = await search_with_outcome(self.connector,
                 query,
@@ -712,7 +718,7 @@ class EvidenceService:
                     seen_arxiv_ids.add(arxiv)
                 if openalex:
                     seen_openalex_ids.add(openalex)
-                metadata = dict(source.metadata)
+                metadata = {**source.metadata, "discovery_query": query, "discovery_query_type": query_type}
                 metadata["canonical_source_id"] = canonical_id
                 scoped_source = source.model_copy(
                     update={
@@ -816,6 +822,9 @@ class EvidenceService:
                 doi=source.doi,
                 retrieved_at=retrieved_at,
                 content_hash=f"sha256:{content_hash}",
+                license=source.license,
+                media_type=source.metadata.get("extraction_media_type"),
+                source_url=source.metadata.get("extraction_url", source.url),
                 raw_metadata=source.model_dump(mode="json"),
                 text=passage,
                 storage_uri=f"sqlite://source_snapshot/{snapshot_id}",
@@ -938,8 +947,10 @@ class EvidenceService:
                 expanded.append(source.model_copy(update={
                     "passage": passage,
                     "abstract": passage,
+                    "url": document.url,
                     "metadata": {
                         **source.metadata,
+                        "discovery_url": source.url,
                         "extraction_media_type": document.media_type,
                         "extraction_content_hash": f"sha256:{document.content_hash}",
                         "extraction_chunk_index": index,

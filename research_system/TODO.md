@@ -3,7 +3,8 @@
 ## Current status (2026-10-11)
 
 - The dashboard and durable local execution queue are implemented and verified in the current branch.
-- Local verification: `python -m pytest tests -q` -> 66 passed; `npm run test:e2e` -> 4 passed, 1 live Foundry test skipped because remote credentials were not configured.
+- Quality hardening is implemented on `feature/research-quality-hardening`. Verification: `python -m pytest tests -q` -> 71 passed; `npm run test:e2e` -> 4 passed, 1 opt-in live test skipped; the guarded live test passed separately. Live scholarly retrieval passed both configured cases. The three-repeat Azure model suite passed all seven cases on every repeat after bounded backoff and bias phrase matching were added. A real Crossref CC BY full-text extraction and abstract comparison also completed.
+- The guarded live browser flow passed with scholarly providers and Azure `gpt-5.6-sol`; it completed at `adjudication_required` with 8 real-source evidence records and 7 reviewed claims. A redacted summary is retained in the local temp directory; no approval or release was created.
 - Dashboard browser coverage exercises project creation, planning, execution, and draft/evidence inspection. A successful local run stops in `reviewing`; human review remains required.
 - The newer task breakdown is on `feature/research-quality-evals` at `45bea89`; its detailed task documents are not yet integrated here.
 - See [Project completion plan](docs/PROJECT_COMPLETION_PLAN.md) and [review/release status](docs/REVIEW_RELEASE_STATUS.md) for production boundaries and delivery steps.
@@ -50,7 +51,7 @@
 - [x] Add research workspace dashboard and durable execution queue
 - [x] Generate deterministic local claim ledger and draft skeleton
 - [x] Generate evidence-backed drafts with semantic fact-check and critical review gates (local prototype; model review still needs evaluation)
-- [ ] Add contradictory-evidence searches
+- [x] Add bounded counter-evidence queries for null/no-effect/failed-replication findings; source records retain the discovery query type.
 
 ## Review, security, and operations
 
@@ -63,10 +64,11 @@
 
 ## Remaining quality and production work
 
-- [ ] Expand and run retrieval evaluations for relevance, date handling, provider outages, duplicates, source independence, and contradictory evidence; set held-out acceptance thresholds.
-- [ ] Expand and run model/review evaluations for unsupported claims, conflicts, stale sources, prompt injection, and failure recovery; include repeated runs and release-blocking criteria.
-- [ ] Complete governed full-text retrieval with licence evidence, provenance, coverage checks, and abstract-versus-full-text comparisons.
-- [ ] Run the guarded live Playwright workflow with real scholarly providers and the selected remote model; retain redacted evidence and verify it stops before approval/release.
+- [x] Expand retrieval evaluations and define release thresholds: Precision@K >= 0.60, Recall@K >= 0.80 against non-empty DOI gold sets, date accuracy >= 0.90, duplicate leakage <= 0.10, at most one failed provider of three when aggregate results remain, explicit author/source independence groups, and required contradiction discovery. The latest live scholarly run passed both cases; all three providers responded, with zero duplicate leakage after deduplication.
+- [x] Expand and run repeated model/review evaluations for unsupported claims, entailment, selection bias, prompt injection, stale evidence, conflicts, and transient-failure recovery. Azure `gpt-5.6-sol` passed all seven cases in each of three repeats; transient-failure recovery passed in every repeat. Release blocks on any failed case.
+- [x] Tighten governed full-text retrieval: only explicit allowlisted CC BY/CC0 identifiers or recognized licence URLs are accepted; ambiguous labels such as “open access” and “arxiv” are rejected. Snapshots/evidence preserve licence, fetched URL, MIME type, retrieval time, and content hash; abstract/full-text coverage and added-term comparison metrics are implemented and locally tested.
+- [x] Run the guarded live Playwright workflow with OpenAlex, Crossref, arXiv, and Azure `gpt-5.6-sol`. It passed and stopped at `adjudication_required`; no approval/release occurred. Redacted summary: `%TEMP%\regula-live-e2e-redacted.json`.
+- [x] Run a real-source full-text extraction against a provider-declared, allowlisted licence and record its abstract-only comparison. Crossref declared CC BY 4.0 for a Research Square HTML source; extraction retained licence, URL, MIME type, retrieval time, and hash. One-source abstract/full-text coverage was 100%; the extracted passage added zero unique terms to the abstract vocabulary. Redacted summary: `%TEMP%\regula-fulltext-live-redacted.json`.
 - [ ] Deploy and validate the hosted Foundry agent if selected, including identity, endpoint access, cost limits, and browser-level behavior.
 - [ ] Replace local SQLite persistence and workers with production Cosmos/Blob/Search/Service Bus adapters; add API hosting, secret delivery, monitoring, backup/restore, and rollback.
 

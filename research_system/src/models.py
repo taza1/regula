@@ -227,6 +227,9 @@ class SourceSnapshotRecord(BaseModel):
     doi: Optional[str] = None
     retrieved_at: datetime
     content_hash: str
+    license: Optional[str] = None
+    media_type: Optional[str] = None
+    source_url: Optional[str] = None
     raw_metadata: Dict[str, Any] = Field(default_factory=dict)
     text: str
     storage_uri: Optional[str] = None
