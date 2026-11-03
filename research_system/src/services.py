@@ -28,6 +28,18 @@ from src.source_connectors import (
     SourceRecord,
 )
 from src.evidence_extraction import chunk_text, fetch_document
+from src.retrieval import (
+    build_contradictory_queries,
+    build_fts_query,
+    cosine,
+    embed_text,
+    reciprocal_rank_fusion,
+)
+
+_KEYWORD_WEIGHT = 0.6
+_SEMANTIC_WEIGHT = 0.4
+_SEMANTIC_MIN_SIMILARITY = 0.05
+_CANDIDATE_LIMIT = 200
 
 
 class DiscoveryIngestionResult(TypedDict):
@@ -1027,30 +1039,101 @@ class EvidenceService:
         search_type: str = "hybrid",  # hybrid, keyword, semantic
         limit: int = 20,
     ) -> List[EvidenceRecord]:
-        """Search evidence with hybrid retrieval."""
+        """Search a run's allowed evidence.
+
+        ``keyword`` ranks with SQLite FTS5 BM25, ``semantic`` ranks by cosine
+        similarity of local hashed embeddings, ``hybrid`` fuses both with
+        weighted reciprocal-rank fusion, and ``contradictory`` runs hybrid
+        searches over negation-expanded queries and fuses them.
+        """
         if not query.strip():
             return []
-        terms = [
-            term
-            for term in re.findall(r"[a-z0-9]{2,}", query.casefold())
-            if term.strip()
-        ]
-        candidates = self.store.list("evidence", tenant_id, project_id, limit=1000)
-        ranked: list[tuple[int, EvidenceRecord]] = []
-        for payload in candidates:
+        limit = max(1, min(limit, 100))
+        if search_type == "contradictory":
+            return await self.search_contradictory_evidence(
+                tenant_id, project_id, run_id, query, limit=limit
+            )
+        if search_type not in ("hybrid", "keyword", "semantic"):
+            raise ValueError(f"Unsupported search_type: {search_type}")
+
+        records = self._allowed_evidence(tenant_id, project_id, run_id)
+        rankings: list[tuple[float, list[str]]] = []
+        if search_type in ("hybrid", "keyword"):
+            rankings.append(
+                (
+                    _KEYWORD_WEIGHT,
+                    self._keyword_ranking(tenant_id, project_id, run_id, query, records),
+                )
+            )
+        if search_type in ("hybrid", "semantic"):
+            rankings.append((_SEMANTIC_WEIGHT, self._semantic_ranking(query, records)))
+        fused = reciprocal_rank_fusion(rankings)
+        return [records[evidence_id] for evidence_id, _ in fused[:limit]]
+
+    async def search_contradictory_evidence(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        query: str,
+        limit: int = 20,
+    ) -> List[EvidenceRecord]:
+        """Find evidence that may oppose a claim by searching with negation terms."""
+        limit = max(1, min(limit, 100))
+        records = self._allowed_evidence(tenant_id, project_id, run_id)
+        rankings = []
+        for match_query in build_contradictory_queries(query):
+            hits = self.store.search_evidence_fts(
+                tenant_id, project_id, run_id, match_query, limit=_CANDIDATE_LIMIT
+            )
+            rankings.append(
+                (1.0, [eid for eid, _ in hits if eid in records])
+            )
+        fused = reciprocal_rank_fusion(rankings)
+        return [records[evidence_id] for evidence_id, _ in fused[:limit]]
+
+    def _allowed_evidence(
+        self, tenant_id: str, project_id: str, run_id: str
+    ) -> dict[str, EvidenceRecord]:
+        records: dict[str, EvidenceRecord] = {}
+        for payload in self.store.list("evidence", tenant_id, project_id, limit=1000):
             evidence = EvidenceRecord.model_validate(payload)
-            if evidence.run_id != run_id or evidence.source_use_decision.value != "allowed":
-                continue
-            haystack_text = " ".join(
-                [evidence.title, evidence.passage, evidence.url, evidence.doi or ""]
-                + evidence.authors
-            ).casefold()
-            haystack_tokens = re.findall(r"[a-z0-9]{2,}", haystack_text)
-            score = sum(haystack_tokens.count(term) for term in terms)
-            if score:
-                ranked.append((score, evidence))
-        ranked.sort(key=lambda item: (-item[0], item[1].created_at))
-        return [evidence for _, evidence in ranked[: max(1, min(limit, 100))]]
+            if (
+                evidence.run_id == run_id
+                and evidence.source_use_decision.value == "allowed"
+            ):
+                records[evidence.evidence_id] = evidence
+        return records
+
+    def _keyword_ranking(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        query: str,
+        records: dict[str, EvidenceRecord],
+    ) -> list[str]:
+        match_query = build_fts_query(query)
+        if not match_query:
+            return []
+        hits = self.store.search_evidence_fts(
+            tenant_id, project_id, run_id, match_query, limit=_CANDIDATE_LIMIT
+        )
+        return [evidence_id for evidence_id, _ in hits if evidence_id in records]
+
+    @staticmethod
+    def _semantic_ranking(
+        query: str, records: dict[str, EvidenceRecord]
+    ) -> list[str]:
+        query_vector = embed_text(query)
+        scored = []
+        for evidence_id, evidence in records.items():
+            text = " ".join([evidence.title, evidence.passage] + evidence.authors)
+            similarity = cosine(query_vector, embed_text(text))
+            if similarity > _SEMANTIC_MIN_SIMILARITY:
+                scored.append((similarity, evidence_id))
+        scored.sort(key=lambda pair: (-pair[0], pair[1]))
+        return [evidence_id for _, evidence_id in scored[:_CANDIDATE_LIMIT]]
     
     async def get_evidence(
         self,

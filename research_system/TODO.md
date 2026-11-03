@@ -35,13 +35,13 @@
 
 ## Search and research generation
 
-- [ ] Add SQLite full-text search
-- [ ] Add embeddings and vector retrieval
+- [x] Add SQLite full-text search (FTS5, BM25)
+- [ ] Add embeddings and vector retrieval (local hashed-embedding baseline done; no learned model yet)
 - [ ] Add Azure AI Search adapter
 - [ ] Implement background run workers
 - [x] Generate deterministic local claim ledger and draft skeleton
 - [ ] Generate reviewed evidence-backed reports
-- [ ] Add contradictory-evidence searches
+- [x] Add contradictory-evidence searches
 
 ## Review, security, and operations
 

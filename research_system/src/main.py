@@ -1,6 +1,6 @@
 """FastAPI application for the research system."""
 
-from typing import Optional, List
+from typing import Literal, Optional, List
 from datetime import datetime
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -138,7 +138,7 @@ class WithdrawReleaseRequest(BaseModel):
 class SearchEvidenceRequest(BaseModel):
     """Search evidence request."""
     query: str
-    search_type: str = "hybrid"
+    search_type: Literal["hybrid", "keyword", "semantic", "contradictory"] = "hybrid"
     limit: int = 20
 
 

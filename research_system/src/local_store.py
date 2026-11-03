@@ -43,6 +43,104 @@ class LocalStateStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
+                    title, passage, authors, doi, url,
+                    tenant_id UNINDEXED, project_id UNINDEXED,
+                    run_id UNINDEXED, entity_id UNINDEXED,
+                    tokenize = 'porter unicode61'
+                )
+                """
+            )
+            self._backfill_evidence_fts(connection)
+
+    @staticmethod
+    def _index_evidence(
+        connection: sqlite3.Connection,
+        tenant_id: str,
+        project_id: str,
+        entity_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        connection.execute(
+            """
+            DELETE FROM evidence_fts
+            WHERE tenant_id = ? AND project_id = ? AND entity_id = ?
+            """,
+            (tenant_id, project_id, entity_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO evidence_fts (
+                title, passage, authors, doi, url,
+                tenant_id, project_id, run_id, entity_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("title") or "",
+                payload.get("passage") or "",
+                " ".join(payload.get("authors") or []),
+                payload.get("doi") or "",
+                payload.get("url") or "",
+                tenant_id,
+                project_id,
+                payload.get("run_id") or "",
+                entity_id,
+            ),
+        )
+
+    def _backfill_evidence_fts(self, connection: sqlite3.Connection) -> None:
+        """Index evidence written before the FTS table existed."""
+
+        rows = connection.execute(
+            """
+            SELECT tenant_id, project_id, entity_id, payload FROM entities
+            WHERE kind = 'evidence' AND NOT EXISTS (
+                SELECT 1 FROM evidence_fts f
+                WHERE f.tenant_id = entities.tenant_id
+                  AND f.project_id = entities.project_id
+                  AND f.entity_id = entities.entity_id
+            )
+            """
+        ).fetchall()
+        for row in rows:
+            self._index_evidence(
+                connection,
+                row["tenant_id"],
+                row["project_id"],
+                row["entity_id"],
+                json.loads(row["payload"]),
+            )
+
+    def search_evidence_fts(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        match_query: str,
+        limit: int = 100,
+    ) -> list[tuple[str, float]]:
+        """Return (evidence_id, bm25) pairs, best match first.
+
+        FTS5 ``bm25()`` is lower for better matches, so the score is negated:
+        callers see larger-is-better. Title is weighted above passage, and
+        passage above authors, DOI and URL.
+        """
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT entity_id, -bm25(evidence_fts, 5.0, 1.0, 2.0, 1.0, 0.5) AS score
+                FROM evidence_fts
+                WHERE evidence_fts MATCH ?
+                  AND tenant_id = ? AND project_id = ? AND run_id = ?
+                ORDER BY score DESC
+                LIMIT ?
+                """,
+                (match_query, tenant_id, project_id, run_id, limit),
+            ).fetchall()
+        return [(row["entity_id"], float(row["score"])) for row in rows]
 
     def put(
         self,
@@ -63,6 +161,10 @@ class LocalStateStore:
                 """,
                 (kind, tenant_id, project_id, entity_id, serialized),
             )
+            if kind == "evidence":
+                self._index_evidence(
+                    connection, tenant_id, project_id, entity_id, payload
+                )
 
     def get(
         self,
