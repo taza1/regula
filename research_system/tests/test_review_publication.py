@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.audit import read_audit
 from src.local_store import LocalStateStore
 from src.model_client import ModelConnectionError
 from src.publication import PublicationService
@@ -70,7 +71,9 @@ def test_review_and_exact_content_release(store):
     assert service.release(KEY, 'publisher', approval['approval_id']) == release
     assert store.get('run', *KEY)['state'] == 'released'
     assert store.get('release_artifact', *KEY[:2], release['release_id'])['bundle']['draft']['conclusions']
-    assert len(store.list('audit', *KEY[:2])) == 2
+    audit = read_audit(store, *KEY[:2], KEY[2])
+    assert [e['action'] for e in audit['events']] == ['review.completed', 'approved', 'released']
+    assert audit['chain_valid']
     assert len(store.list('outbox', *KEY[:2])) == 1
 
 

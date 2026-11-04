@@ -8,7 +8,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from src.audit import append_audit
 from src.config import get_research_config
+from src.injection_scan import scan_evidence
 from src.model_client import ModelConnectionError
 
 
@@ -130,26 +132,44 @@ class ReviewPipeline:
         except ValidationError as error:
             raise ModelConnectionError("Model review output failed its schema contract.") from error
 
-        blockers = list(critical.blocking_issues)
-        blockers.extend(v.explanation for v in check.verdicts if v.verdict != 'supported')
+        # Each blocker carries a category so a human adjudicator's options can be
+        # limited by it (see src/adjudication.py): model/fact_check blockers are
+        # judgment calls; security blockers may only be cleared as false positives;
+        # integrity and policy blockers cannot be waived, only fixed and re-reviewed.
+        blocker_items: list[dict] = []
+
+        def add_blocker(text, category):
+            blocker_items.append({'id': f"B{len(blocker_items) + 1}-{digest(text)[:8]}",
+                                  'text': text, 'category': category})
+
+        for text in critical.blocking_issues:
+            add_blocker(text, 'model')
+        for v in check.verdicts:
+            if v.verdict != 'supported':
+                add_blocker(v.explanation, 'fact_check')
+        # Deterministic backstop: runs regardless of what the model reported.
+        for evidence_id, labels in scan_evidence(selected).items():
+            add_blocker(f"Evidence {evidence_id} contains instruction-like text ({', '.join(labels)}); "
+                        "treated as a prompt-injection risk.", 'security')
         config = get_research_config()
         for claim in claims:
             cited = [e for e in selected if e['evidence_id'] in claim['evidence_ids']]
             origins = {g for e in cited for g in e.get('independence_group_ids', [])}
             if len(origins) < config.min_independence_groups:
-                blockers.append(f"Claim {claim['claim_id']} has too few independent source groups.")
+                add_blocker(f"Claim {claim['claim_id']} has too few independent source groups.", 'policy')
         for e in selected:
             if e.get('content_hash') != 'sha256:' + hashlib.sha256(e['passage'].encode()).hexdigest():
-                blockers.append(f"Evidence {e['evidence_id']} failed content integrity validation.")
+                add_blocker(f"Evidence {e['evidence_id']} failed content integrity validation.", 'integrity')
         groups = {g for e in selected for g in e.get('independence_group_ids', [])}
         if len(groups) < config.min_independence_groups:
-            blockers.append('Too few independent source groups for release.')
+            add_blocker('Too few independent source groups for release.', 'policy')
         if any(e.get('independence_status') != 'assessed' for e in selected):
-            blockers.append('Source independence remains unassessed.')
+            add_blocker('Source independence remains unassessed.', 'policy')
         if config.require_peer_review and any(e['peer_review_status'] != 'peer-reviewed' for e in selected):
-            blockers.append('The release policy requires peer-reviewed evidence.')
+            add_blocker('The release policy requires peer-reviewed evidence.', 'policy')
         if config.require_publication_date and any(not e.get('published_at') for e in selected):
-            blockers.append('The release policy requires publication dates.')
+            add_blocker('The release policy requires publication dates.', 'policy')
+        blockers = [item['text'] for item in blocker_items]
 
         draft = dict(tenant_id=tenant, project_id=project, run_id=run_id,
                      report_revision=run['report_revision'], title=run['research_request']['title'],
@@ -161,7 +181,8 @@ class ReviewPipeline:
                       provider=self.model.provider, model=self.model.model, prompt_version='research-review-v1',
                       policy=release_policy(),
                       fact_check=check.model_dump(), critical_review=critical.model_dump(),
-                      blockers=blockers, passed=not blockers, evidence_digest=digest(evidence),
+                      blockers=blockers, blocker_items=blocker_items, passed=not blockers,
+                      evidence_digest=digest(evidence),
                       draft_digest=digest(draft), claims_digest=digest(claims), claims=claims)
         with self.store._connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -181,4 +202,7 @@ class ReviewPipeline:
             write_entity(db, 'model_review', key, run_id, review)
             current['state'] = 'awaiting_approval' if not blockers else 'adjudication_required'
             write_entity(db, 'run', key, run_id, current)
+            append_audit(db, key, 'review-pipeline', 'review.completed', run_id,
+                         {'passed': not blockers, 'blockers': len(blockers),
+                          'provider': self.model.provider, 'model': self.model.model})
         return review

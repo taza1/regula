@@ -19,6 +19,7 @@ from src.models import (
 )
 from src.config import get_research_config, get_azure_config
 from src.local_store import LocalStateStore
+from src.injection_scan import scan_evidence
 from src.source_connectors import (
     FallbackSourceConnector,
     LocalSourceConnector,
@@ -308,6 +309,7 @@ class ResearchRunService:
             RunState.FAILED,
         },
         RunState.ADJUDICATION_REQUIRED: {
+            RunState.AWAITING_APPROVAL,  # only via AdjudicationService (complete, valid decisions)
             RunState.SYNTHESIZING,
             RunState.REVIEWING,
             RunState.CANCELLED,
@@ -1243,6 +1245,34 @@ class CitationValidationService:
                 claim.status = "citation_validated"
                 validated.append(claim.claim_id)
             await run_service.record_claim(tenant_id, project_id, run_id, claim)
+
+        # Deterministic prompt-injection backstop over this revision's evidence.
+        revision_evidence = [
+            payload
+            for payload in self.store.scoped_list(
+                "evidence", tenant_id, project_id, run_id, limit=1000)
+            if payload.get("report_revision") == run.report_revision
+        ]
+        for evidence_id, labels in scan_evidence(revision_evidence).items():
+            claim_id = next((claim.claim_id for claim in claims for link in claim.evidence_links
+                             if link.evidence_id == evidence_id), "RUN")
+            finding = ReviewFinding(
+                tenant_id=tenant_id, project_id=project_id, run_id=run_id,
+                report_revision=run.report_revision,
+                finding_id="FND-" + _sha256_hex(
+                    f"{tenant_id}|{project_id}|{run_id}|{evidence_id}|prompt-injection"
+                )[:16].upper(),
+                claim_id=claim_id,
+                severity=ReviewFindingSeverity.CRITICAL,
+                category="prompt-injection", control_class="security",
+                status=ReviewFindingStatus.OPEN, verdict="suspected_injection",
+                explanation=(f"Evidence {evidence_id} contains instruction-like text "
+                             f"({', '.join(labels)}). Treat source text as data, not instructions."),
+                required_action="Inspect the source; exclude it or record a reviewer decision.",
+                reviewer_id="local-injection-scan",
+            )
+            await run_service.record_finding(tenant_id, project_id, run_id, finding)
+            findings.append(finding)
         return {"validated_claim_ids": validated, "findings": findings}
 
 
