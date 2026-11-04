@@ -183,6 +183,15 @@ class LocalStateStore:
             ).fetchone()
         return json.loads(row["payload"]) if row else None
 
+    def list_all_tenants(self, kind: str, limit: int = 1000) -> list[dict[str, Any]]:
+        """List one kind across all tenants (startup recovery only; never for API reads)."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM entities WHERE kind = ? ORDER BY updated_at LIMIT ?",
+                (kind, limit),
+            ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
     def list(
         self,
         kind: str,

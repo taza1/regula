@@ -38,19 +38,19 @@
 - [x] Add SQLite full-text search (FTS5, BM25)
 - [ ] Add embeddings and vector retrieval (local hashed-embedding baseline done; no learned model yet)
 - [ ] Add Azure AI Search adapter
-- [ ] Implement background run workers
+- [x] Implement background run workers (in-process queue, persisted job status)
 - [x] Generate deterministic local claim ledger and draft skeleton
-- [ ] Generate reviewed evidence-backed reports
+- [x] Generate reviewed evidence-backed reports (deterministic draft passes review gates; no model-written prose yet)
 - [x] Add contradictory-evidence searches
 
 ## Review, security, and operations
 
-- [ ] Implement fact-checking and citation validation
-- [ ] Add critical review and prompt-injection checks
-- [ ] Add authenticated identity and role enforcement
-- [ ] Complete approval and release workflows
+- [x] Implement fact-checking and citation validation (rule-based, offline)
+- [x] Add critical review and prompt-injection checks (rule-based, offline)
+- [ ] Add authenticated identity and role enforcement (local project roles enforced on every endpoint; Entra ID token validation still needed)
+- [x] Complete approval and release workflows (local file release; digest-bound approval)
 - [ ] Add Cosmos DB, Blob Storage, Service Bus, and Key Vault deployment
-- [ ] Add monitoring, audit events, and production deployment
+- [ ] Add monitoring and production deployment (local hash-chained audit events done)
 
 ## Definition of done for the next release
 

@@ -18,7 +18,12 @@ from src.services import (
     ApprovalService, ReleaseService, EvidenceService, SynthesisService
 )
 from src.agents import AgentMessage, AgentOrchestrator, AgentRole
+from src.audit import AuditService
+from src.bundle import blocking_findings
 from src.local_store import LocalStateStore
+from src.models import ReviewFindingStatus
+from src.review_service import ReviewService
+from src.workers import RunWorker
 from src.model_client import ModelConnectionError, ResearchModelClient, create_model_client
 
 
@@ -36,6 +41,9 @@ evidence_service: Optional[EvidenceService] = None
 synthesis_service: Optional[SynthesisService] = None
 orchestrator: Optional[AgentOrchestrator] = None
 model_client: Optional[ResearchModelClient] = None
+review_service: Optional[ReviewService] = None
+audit_service: Optional[AuditService] = None
+run_worker: Optional[RunWorker] = None
 
 
 @asynccontextmanager
@@ -43,8 +51,8 @@ async def lifespan(app: FastAPI):
     """Application lifecycle management."""
     global tenant_service, project_service, run_service
     global approval_service, release_service, evidence_service, synthesis_service, orchestrator
-    global model_client
-    
+    global model_client, review_service, audit_service, run_worker
+
     # Startup
     store = LocalStateStore(api_config.local_db_path)
     tenant_service = TenantService(store)
@@ -56,12 +64,17 @@ async def lifespan(app: FastAPI):
     synthesis_service = SynthesisService(store)
     model_client = create_model_client(get_model_config())
     orchestrator = AgentOrchestrator(model_client)
-    
+    audit_service = AuditService(store)
+    review_service = ReviewService(store, evidence_service)
+    run_worker = RunWorker(store, evidence_service, synthesis_service, review_service)
+    await run_worker.start()
+
     print("Research system services initialized")
-    
+
     yield
-    
+
     # Shutdown
+    await run_worker.stop()
     print("Research system shutdown")
 
 
@@ -673,6 +686,150 @@ async def cancel_research_run(
 
 
 # ============================================================================
+# Background Execution, Review and Audit Endpoints
+# ============================================================================
+
+class ResolveFindingRequest(BaseModel):
+    """Reviewer decision on one review finding."""
+    status: Literal["accepted_limitation", "false_positive", "resolved"]
+    rationale: str
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/start-background", status_code=202)
+async def start_background_run(
+    project_id: str,
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Queue a confirmed run for background discovery, synthesis and review."""
+    scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+    await _require_project_role(
+        scoped_tenant_id, project_id, auth.user_id,
+        [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN],
+    )
+    job = await run_worker.enqueue(scoped_tenant_id, project_id, run_id, auth.user_id)
+    if not job:
+        raise HTTPException(
+            status_code=409,
+            detail="Run must be confirmed (queued) with a plan and not already running",
+        )
+    return {"job": job}
+
+
+@app.get("/api/v1/projects/{project_id}/runs/{run_id}/job")
+async def get_background_job(
+    project_id: str,
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+    await _require_project_role(
+        scoped_tenant_id, project_id, auth.user_id, list(ProjectMembership)
+    )
+    job = run_worker.get_job(scoped_tenant_id, project_id, run_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="No background job for this run")
+    return {"job": job}
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/review")
+async def review_run(
+    project_id: str,
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Run citation, fact-check, security and critical review gates."""
+    scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+    await _require_project_role(
+        scoped_tenant_id, project_id, auth.user_id,
+        [ProjectMembership.REVIEWER, ProjectMembership.ADMIN],
+    )
+    outcome = await review_service.run_review(
+        scoped_tenant_id, project_id, run_id, auth.user_id
+    )
+    if not outcome:
+        raise HTTPException(
+            status_code=409,
+            detail="Run must be in reviewing or adjudication_required with a draft",
+        )
+    return {
+        "state": outcome["state"].value,
+        "blocking_findings": outcome["blocking"],
+        "findings": [f.model_dump(mode="json") for f in outcome["findings"]],
+    }
+
+
+@app.get("/api/v1/projects/{project_id}/runs/{run_id}/findings")
+async def list_findings(
+    project_id: str,
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+    await _require_project_role(
+        scoped_tenant_id, project_id, auth.user_id, list(ProjectMembership)
+    )
+    findings = await review_service.list_findings(scoped_tenant_id, project_id, run_id)
+    dumped = [f.model_dump(mode="json") for f in findings]
+    return {
+        "findings": dumped,
+        "count": len(dumped),
+        "blocking": len(blocking_findings(dumped)),
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/findings/{finding_id}/resolve")
+async def resolve_finding(
+    project_id: str,
+    run_id: str,
+    finding_id: str,
+    request: ResolveFindingRequest,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Record a reviewer decision; critical findings cannot be accepted as limitations."""
+    scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+    await _require_project_role(
+        scoped_tenant_id, project_id, auth.user_id,
+        [ProjectMembership.REVIEWER, ProjectMembership.ADMIN],
+    )
+    finding = await review_service.resolve_finding(
+        scoped_tenant_id, project_id, run_id, finding_id,
+        ReviewFindingStatus(request.status), auth.user_id, request.rationale,
+    )
+    if not finding:
+        raise HTTPException(
+            status_code=409,
+            detail="Finding not found, rationale missing, or decision not allowed for its severity",
+        )
+    return {"finding": finding.model_dump(mode="json")}
+
+
+@app.get("/api/v1/projects/{project_id}/runs/{run_id}/audit")
+async def get_audit_trail(
+    project_id: str,
+    run_id: str,
+    tenant_id: Optional[str] = Query(None, deprecated=True),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    scoped_tenant_id = _validate_tenant_query(tenant_id, auth)
+    await _require_project_role(
+        scoped_tenant_id, project_id, auth.user_id,
+        [ProjectMembership.ADMIN, ProjectMembership.REVIEWER, ProjectMembership.PUBLISHER],
+    )
+    events = audit_service.list_events(scoped_tenant_id, project_id, run_id)
+    return {
+        "events": events,
+        "count": len(events),
+        "chain_valid": audit_service.verify_chain(scoped_tenant_id, project_id, run_id),
+    }
+
+
+# ============================================================================
 # Approval and Release Endpoints
 # ============================================================================
 
@@ -704,16 +861,21 @@ async def request_approval(
 
         approval = await approval_service.request_approval(
             scoped_tenant_id, project_id, run_id,
-            report_revision=1,
-            approver_id=auth.user_id
+            report_revision=run.report_revision,
+            approver_id=auth.user_id,
+            rationale=request.approval_rationale,
         )
-        
+
         if not approval:
-            raise HTTPException(status_code=409, detail="Failed to create approval")
-        
+            raise HTTPException(
+                status_code=409,
+                detail="Approval blocked: a draft is required and no high or "
+                       "critical review finding may remain open",
+            )
+
         return {
             "approval": approval.model_dump(mode='json'),
-            "message": "Approval request created"
+            "message": "Report approved; release is now possible"
         }
     except HTTPException:
         raise
@@ -737,13 +899,26 @@ async def release_report(
         auth.user_id,
         [ProjectMembership.PUBLISHER, ProjectMembership.ADMIN],
     )
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "Internal release is not implemented. Artifact verification, "
-            "authenticated approval, and conditional commit are required."
-        ),
+    approval = await approval_service.get_approval(
+        scoped_tenant_id, project_id, request.approval_id
     )
+    run = await run_service.get_run(scoped_tenant_id, project_id, run_id)
+    if not approval or not run or approval.run_id != run_id or not approval.validity:
+        raise HTTPException(status_code=409, detail="A valid approval for this run is required")
+    release_id = await release_service.prepare_release(
+        scoped_tenant_id, project_id, run_id, approval.report_revision, approval
+    )
+    if not release_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Release blocked: run is not approved or the report changed since approval",
+        )
+    release = await release_service.commit_release(
+        scoped_tenant_id, project_id, run_id, release_id, approval
+    )
+    if not release:
+        raise HTTPException(status_code=409, detail="Release artifacts failed verification")
+    return {"release": release.model_dump(mode="json"), "message": "Report released internally"}
 
 
 @app.post("/api/v1/releases/{release_id}/withdraw")

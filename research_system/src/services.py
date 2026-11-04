@@ -4,9 +4,11 @@ from typing import Optional, List, Dict, Any, TypedDict
 from datetime import datetime
 import asyncio
 import hashlib
+import json
 import re
 import uuid
 from abc import ABC, abstractmethod
+from pathlib import Path
 from urllib.parse import urlparse
 
 from src.models import (
@@ -17,6 +19,8 @@ from src.models import (
 )
 from src.config import get_research_config, get_azure_config
 from src.local_store import LocalStateStore
+from src.audit import AuditService
+from src.bundle import blocking_findings, bundle_digest, load_bundle
 from src.source_connectors import (
     FallbackSourceConnector,
     LocalSourceConnector,
@@ -494,30 +498,54 @@ class ApprovalService:
         project_id: str,
         run_id: str,
         report_revision: int,
-        approver_id: str
+        approver_id: str,
+        rationale: Optional[str] = None,
     ) -> Optional[ApprovalRecord]:
-        """Request approval for a report."""
-        # TODO: Validate run and report
-        # TODO: Verify approver is not the requester (if policy requires)
-        # TODO: Compute approved bundle digest
-        
+        """Approve a reviewed report and bind the approval to its content digest.
+
+        Returns None unless the run is awaiting approval at ``report_revision``,
+        a draft exists, and no high/critical finding is still open. The digest
+        covers the draft, claims, findings and evidence hashes, so a later change
+        to any of them invalidates the approval at release time.
+        """
+        run_service = ResearchRunService(self.store)
+        run = await run_service.get_run(tenant_id, project_id, run_id)
+        if (
+            not run
+            or run.state != RunState.AWAITING_APPROVAL
+            or run.report_revision != report_revision
+        ):
+            return None
+        bundle = load_bundle(self.store, tenant_id, project_id, run_id)
+        if not bundle or blocking_findings(bundle["findings"]):
+            return None
+
         approval = ApprovalRecord(
             tenant_id=tenant_id,
             project_id=project_id,
             run_id=run_id,
             report_revision=report_revision,
             approval_id=f"APR-{uuid.uuid4().hex[:8].upper()}",
-            approved_bundle_digest=f"SHA256-{uuid.uuid4().hex[:16].upper()}",
+            approved_bundle_digest=bundle_digest(bundle),
             approver_id=approver_id,
-            approved_at=datetime.utcnow()
+            approved_at=datetime.utcnow(),
+            approval_rationale=rationale,
         )
-        
+        if not await run_service.update_run_state(
+            tenant_id, project_id, run_id, RunState.APPROVED,
+            revision=report_revision, expected_state=RunState.AWAITING_APPROVAL,
+        ):
+            return None
         self.store.put(
             "approval",
             tenant_id,
             project_id,
             approval.approval_id,
             approval.model_dump(mode="json"),
+        )
+        AuditService(self.store).record(
+            tenant_id, project_id, run_id, approver_id, "approval.granted",
+            {"approval_id": approval.approval_id, "digest": approval.approved_bundle_digest},
         )
         return approval
     
@@ -567,7 +595,12 @@ class ReleaseService:
         report_revision: int,
         approval_record: ApprovalRecord
     ) -> Optional[str]:
-        """Prepare artifacts for release."""
+        """Freeze the approved bundle to local release files and mark the run pending.
+
+        Returns None (leaving the run untouched) when the approval is invalid,
+        belongs to another run, or the bundle no longer matches the digest that
+        was approved. A write failure moves the run to FAILED.
+        """
         if (
             approval_record is None
             or not approval_record.validity
@@ -577,13 +610,48 @@ class ReleaseService:
             or approval_record.report_revision != report_revision
         ):
             return None
-        # TODO: Freeze report, evidence manifest, evaluation results
-        # TODO: Verify manifest signatures
-        # TODO: Upload to private Blob Storage
-        # Returns release ID if successful
-        
+        run_service = ResearchRunService(self.store)
+        run = await run_service.get_run(tenant_id, project_id, run_id)
+        if not run or run.state != RunState.APPROVED or run.report_revision != report_revision:
+            return None
+        bundle = load_bundle(self.store, tenant_id, project_id, run_id)
+        if not bundle or bundle_digest(bundle) != approval_record.approved_bundle_digest:
+            return None
+        if not await run_service.update_run_state(
+            tenant_id, project_id, run_id, RunState.RELEASE_PENDING,
+            revision=report_revision, expected_state=RunState.APPROVED,
+        ):
+            return None
+
         release_id = f"REL-{uuid.uuid4().hex[:8].upper()}"
+        report_bytes = json.dumps(bundle, sort_keys=True, indent=2, default=str).encode("utf-8")
+        manifest = {
+            "release_id": release_id,
+            "run_id": run_id,
+            "report_revision": report_revision,
+            "approval_id": approval_record.approval_id,
+            "bundle_digest": approval_record.approved_bundle_digest,
+            "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            "evidence_hashes": bundle["evidence_hashes"],
+            "frozen_at": datetime.utcnow().isoformat(),
+        }
+        try:
+            directory = self._release_dir(release_id)
+            directory.mkdir(parents=True, exist_ok=False)
+            (directory / "report.json").write_bytes(report_bytes)
+            (directory / "manifest.json").write_text(
+                json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8"
+            )
+        except OSError:
+            await run_service.update_run_state(
+                tenant_id, project_id, run_id, RunState.FAILED,
+                revision=report_revision, expected_state=RunState.RELEASE_PENDING,
+            )
+            return None
         return release_id
+
+    def _release_dir(self, release_id: str) -> Path:
+        return self.store.database_path.parent / "releases" / release_id
     
     async def commit_release(
         self,
@@ -593,24 +661,41 @@ class ReleaseService:
         release_id: str,
         approval_record: ApprovalRecord
     ) -> Optional[ReleaseRecord]:
-        """Commit release with ADR-015 invariants."""
-        if not approval_record.validity:
+        """Verify the frozen artifacts and mark the run released (local files).
+
+        Local stand-in for the conditional Cosmos transaction: it re-checks the
+        approval, the run state, and the frozen report against its manifest
+        before the single state change. Blob URLs are file:// URIs locally.
+        """
+        if (
+            not approval_record.validity
+            or approval_record.tenant_id != tenant_id
+            or approval_record.project_id != project_id
+            or approval_record.run_id != run_id
+        ):
             return None
         run_service = ResearchRunService(self.store)
         run = await run_service.get_run(tenant_id, project_id, run_id)
-        if not run or run.state != RunState.APPROVED:
+        if (
+            not run
+            or run.state != RunState.RELEASE_PENDING
+            or run.report_revision != approval_record.report_revision
+        ):
             return None
 
-        # TODO: Replace this local sequence with the conditional Cosmos transaction:
-        #   1. Check authorization and project guard version
-        #   2. Check approval still valid
-        #   3. Verify run state is approved
-        #   4. Update run state to released
-        #   5. Create release marker
-        #   6. Record audit and outbox events
-        # TODO: Dispatch outbox to Service Bus
-        # TODO: Handle storage failures and stale approvals
-        
+        directory = self._release_dir(release_id)
+        try:
+            manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+            report_bytes = (directory / "report.json").read_bytes()
+        except (OSError, ValueError):
+            return None
+        if (
+            manifest.get("report_sha256") != hashlib.sha256(report_bytes).hexdigest()
+            or manifest.get("bundle_digest") != approval_record.approved_bundle_digest
+            or manifest.get("approval_id") != approval_record.approval_id
+        ):
+            return None
+
         release = ReleaseRecord(
             tenant_id=tenant_id,
             project_id=project_id,
@@ -620,19 +705,20 @@ class ReleaseService:
             released_at=datetime.utcnow(),
             released_by=approval_record.approver_id,
             approval_reference=approval_record.approval_id,
-            report_blob_url="https://storage.blob.core.windows.net/...",
-            manifest_blob_url="https://storage.blob.core.windows.net/..."
+            report_blob_url=(directory / "report.json").as_uri(),
+            manifest_blob_url=(directory / "manifest.json").as_uri(),
         )
-        
+        if not await run_service.update_run_state(
+            tenant_id, project_id, run_id, RunState.RELEASED,
+            revision=approval_record.report_revision, expected_state=RunState.RELEASE_PENDING,
+        ):
+            return None
         self.store.put(
             "release", tenant_id, project_id, release_id, release.model_dump(mode="json")
         )
-        await run_service.update_run_state(
-            tenant_id,
-            project_id,
-            run_id,
-            RunState.RELEASED,
-            revision=approval_record.report_revision,
+        AuditService(self.store).record(
+            tenant_id, project_id, run_id, approval_record.approver_id, "release.committed",
+            {"release_id": release_id, "approval_id": approval_record.approval_id},
         )
         return release
     
@@ -679,6 +765,10 @@ class ReleaseService:
         release.withdrawn_by = withdrawn_by
         self.store.put(
             "release", tenant_id, project_id, release_id, release.model_dump(mode="json")
+        )
+        AuditService(self.store).record(
+            tenant_id, project_id, release.run_id, withdrawn_by, "release.withdrawn",
+            {"release_id": release_id, "reason": reason},
         )
         return True
 
