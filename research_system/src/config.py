@@ -65,7 +65,11 @@ class ModelConfig(BaseSettings):
         description="Loopback bridge key supplied only through local environment",
     )
     model_timeout_seconds: float = Field(default=120.0, gt=0)
-    
+    # Independent verifier model (FUT-060): a different provider/model than the reviewer.
+    # Uses the same endpoint settings as the main model unless the provider differs.
+    verifier_provider: str = Field(default="", description="azure or local_proxy; empty disables the model verifier")
+    verifier_model: str = Field(default="", description="Model or deployment name for the verifier")
+
     # OpenAI configuration
     openai_api_version: str = Field(default="v1", description="OpenAI API version")
     openai_deployment_id: str = Field(default="gpt-5.6-sol", description="Azure deployment ID")
@@ -165,6 +169,33 @@ class ResearchConfig(BaseSettings):
     # Approval settings
     require_human_approval: bool = Field(default=True, description="Require human approval before release")
     require_separate_publisher: bool = Field(default=True, description="Require different user as publisher")
+
+    # Report governance (FUT-080). Both default off so existing release behavior is unchanged;
+    # enabling them is a release-policy decision for reviewers.
+    require_separate_adjudicator: bool = Field(
+        default=False, description="Approver may not be a user who adjudicated this run's blockers")
+    release_require_licence: bool = Field(
+        default=False, description="Every eligible source must declare a licence to approve or release")
+
+    # Independent verification (FUT-060). "off" keeps the current review path unchanged.
+    # When enabled it fails closed: an unavailable or non-independent verifier blocks release.
+    independent_verification: Literal["off", "deterministic", "model", "both"] = Field(
+        default="off", description="Second, independent check of each claim during review")
+    verifier_timeout_seconds: float = Field(default=60.0, gt=0)
+    verifier_max_attempts: int = Field(default=2, ge=1, le=5)
+
+    # Retrieval (FUT-020). Defaults preserve keyword-only FTS5/BM25 behavior.
+    retrieval_mode: Literal["keyword", "hybrid", "semantic"] = Field(
+        default="keyword", description="Default search mode when a request does not choose one")
+    retrieval_embedding_provider: Literal["none", "local_hash", "model_endpoint"] = Field(
+        default="none",
+        description="none disables vectors; local_hash is an offline lexical test adapter; "
+                    "model_endpoint sends evidence text to the configured model endpoint")
+    retrieval_candidate_limit: int = Field(default=200, ge=1, le=1000)
+    retrieval_keyword_weight: float = Field(default=0.6, ge=0)
+    retrieval_semantic_weight: float = Field(default=0.4, ge=0)
+    retrieval_fusion_k: int = Field(default=60, ge=1, description="Reciprocal-rank-fusion constant")
+    retrieval_min_similarity: float = Field(default=0.05, ge=-1, le=1)
     
 class APIConfig(BaseSettings):
     """API server configuration."""

@@ -172,6 +172,15 @@ class LocalResearchWorker:
                 except Exception:
                     status = 'unavailable'
                 job['documents'].append(dict(source_id=source.source_id, title=source.title, status=status))
+        if getattr(self.evidence, 'embedder', None) is not None:
+            # Vectors are optional and derived; a provider failure must not fail the run.
+            try:
+                await self.checkpoint(job, 'vectors', 'Indexing evidence vectors.')
+                job['vector_index'] = await self.evidence.index_vectors(*key)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                job['vector_index'] = {'status': 'failed', 'fallback': 'keyword'}
         await self.checkpoint(job, 'synthesis', 'Preparing the cited draft.')
         if not await self.runs.update_run_state(*key, RunState.SYNTHESIZING, expected_state=RunState.COLLECTING):
             raise asyncio.CancelledError()

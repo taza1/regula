@@ -29,6 +29,8 @@ from src.execution import ExecutionQueue, LocalResearchWorker
 from src.review_pipeline import ReviewPipeline, digest
 from src.publication import PublicationService
 from src.adjudication import AdjudicationService
+from src.embeddings import EmbeddingError, create_embedding_provider
+from src.governance import GovernanceService, release_readiness
 from src.audit import read_audit
 
 
@@ -73,6 +75,9 @@ async def lifespan(app: FastAPI):
     synthesis_service = SynthesisService(store)
     citation_validation_service = CitationValidationService(store)
     model_client = create_model_client(get_model_config())
+    if get_research_config().retrieval_embedding_provider == "model_endpoint":
+        evidence_service.embedder = create_embedding_provider(
+            "model_endpoint", get_model_config(), model_client)
     orchestrator = AgentOrchestrator(model_client)
     execution_queue = ExecutionQueue(store)
     worker = LocalResearchWorker(execution_queue, evidence_service, model_client)
@@ -176,7 +181,9 @@ class WithdrawReleaseRequest(BaseModel):
 class SearchEvidenceRequest(BaseModel):
     """Search evidence request."""
     query: str
-    search_type: str = "hybrid"
+    # None uses RETRIEVAL_MODE (default keyword). hybrid/semantic degrade to keyword
+    # when vectors are unavailable; the response says which mode ran and why.
+    search_type: Optional[Literal["keyword", "hybrid", "semantic"]] = None
     limit: int = 20
 
 
@@ -877,23 +884,60 @@ async def withdraw_release(
             [ProjectMembership.PUBLISHER, ProjectMembership.ADMIN],
         )
         
-        success = await release_service.withdraw_release(
-            scoped_tenant_id, project_id, release_id,
-            reason=request.reason,
-            withdrawn_by=auth.user_id
-        )
-        
-        if not success:
-            raise HTTPException(status_code=409, detail="Failed to withdraw release")
-        
+        try:
+            GovernanceService(run_service.store).withdraw(
+                scoped_tenant_id, project_id, auth.user_id, release_id, request.reason)
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
         return {
-            "message": "Release withdrawn",
+            "message": "Release withdrawn; the artifact is retained as a tombstone and reads return 410",
             "release_id": release_id
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class RevokeEvidenceRequest(BaseModel):
+    reason: str
+
+
+@app.post("/api/v1/projects/{project_id}/evidence/{evidence_id}/revoke")
+async def revoke_evidence(project_id: str, evidence_id: str, request: RevokeEvidenceRequest,
+                          auth: AuthContext = Depends(get_auth_context)):
+    """Retract a source. Blocks new approvals/releases that use it and lists affected releases."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id,
+                                [ProjectMembership.REVIEWER, ProjectMembership.ADMIN])
+    try:
+        return GovernanceService(run_service.store).revoke_evidence(
+            auth.tenant_id, project_id, auth.user_id, evidence_id, request.reason)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/api/v1/projects/{project_id}/releases/{release_id}/provenance")
+async def release_provenance(project_id: str, release_id: str,
+                             auth: AuthContext = Depends(get_auth_context)):
+    """Claim -> cited passage -> review -> approval chain for a release (authenticated)."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id, list(ProjectMembership))
+    try:
+        return GovernanceService(run_service.store).provenance(auth.tenant_id, project_id, release_id)
+    except ValueError as error:
+        status = 404 if "not found" in str(error) else 409
+        raise HTTPException(status_code=status, detail=str(error)) from error
+
+
+@app.get("/api/v1/projects/{project_id}/release-readiness")
+async def release_readiness_report(project_id: str, auth: AuthContext = Depends(get_auth_context)):
+    """Promotion checklist. Reports; never enables release."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id, [ProjectMembership.ADMIN])
+    return release_readiness(get_research_config(), api_config)
 
 
 # ============================================================================
@@ -922,19 +966,43 @@ async def search_evidence(
                 ProjectMembership.ADMIN,
             ],
         )
-        results = await evidence_service.search_evidence(
+        outcome = await evidence_service.search_evidence_detailed(
             scoped_tenant_id, project_id, run_id,
             query=request.query,
             search_type=request.search_type,
             limit=request.limit,
         )
-        
+        results = outcome["results"]
+
         return {
             "results": [r.model_dump(mode='json') for r in results],
-            "count": len(results)
+            "count": len(results),
+            "mode": outcome["mode"],
+            "requested_mode": outcome["requested_mode"],
+            "degraded_reason": outcome["degraded_reason"],
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/index-vectors")
+async def index_evidence_vectors(
+    project_id: str,
+    run_id: str,
+    rebuild: bool = Query(False),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Embed this run's eligible evidence (idempotent; rebuild=true recomputes)."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id,
+                                [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN])
+    if not await run_service.get_run(auth.tenant_id, project_id, run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        return await evidence_service.index_vectors(auth.tenant_id, project_id, run_id, rebuild)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except EmbeddingError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/evidence")

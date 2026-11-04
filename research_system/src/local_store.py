@@ -44,6 +44,21 @@ class LocalStateStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS evidence_vectors (
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    evidence_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    vector TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (tenant_id, project_id, evidence_id, model_id)
+                )
+                """
+            )
             try:
                 existing_columns = [row[1] for row in connection.execute(
                     "PRAGMA table_info(evidence_fts)"
@@ -200,6 +215,47 @@ class LocalStateStore:
             except sqlite3.OperationalError:
                 return None
         return [json.loads(row["payload"]) for row in rows]
+
+    # ---- vectors (FUT-020). Derived data: always rebuildable from evidence. ----
+
+    def put_vector(self, tenant_id: str, project_id: str, run_id: str, evidence_id: str,
+                   model_id: str, content_hash: str, vector: list[float]) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT INTO evidence_vectors (tenant_id, project_id, run_id, evidence_id, "
+                "model_id, content_hash, vector) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(tenant_id, project_id, evidence_id, model_id) DO UPDATE SET "
+                "run_id=excluded.run_id, content_hash=excluded.content_hash, "
+                "vector=excluded.vector, created_at=CURRENT_TIMESTAMP",
+                (tenant_id, project_id, run_id, evidence_id, model_id, content_hash,
+                 json.dumps(vector, separators=(",", ":"))),
+            )
+
+    def delete_vectors(self, tenant_id: str, project_id: str, run_id: str,
+                       model_id: Optional[str] = None) -> int:
+        clauses, values = ["tenant_id=?", "project_id=?", "run_id=?"], [tenant_id, project_id, run_id]
+        if model_id is not None:
+            clauses.append("model_id=?")
+            values.append(model_id)
+        with self._lock, self._connect() as connection:
+            return connection.execute(
+                "DELETE FROM evidence_vectors WHERE " + " AND ".join(clauses), values).rowcount
+
+    def run_vectors(self, tenant_id: str, project_id: str, run_id: str,
+                    model_id: str) -> list[dict[str, Any]]:
+        """Vectors joined to the LIVE evidence record, so eligibility is never read from the index."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT v.evidence_id, v.content_hash AS vector_hash, v.vector, e.payload "
+                "FROM evidence_vectors v JOIN entities e ON e.kind='evidence' "
+                "AND e.tenant_id=v.tenant_id AND e.project_id=v.project_id "
+                "AND e.entity_id=v.evidence_id "
+                "WHERE v.tenant_id=? AND v.project_id=? AND v.run_id=? AND v.model_id=?",
+                (tenant_id, project_id, run_id, model_id),
+            ).fetchall()
+        return [{"evidence_id": r["evidence_id"], "vector_hash": r["vector_hash"],
+                 "vector": json.loads(r["vector"]), "evidence": json.loads(r["payload"])}
+                for r in rows]
 
     def scoped_list(self, kind, tenant_id, project_id=None, run_id=None, limit=100, offset=0):
         """Filter before pagination so other runs cannot hide matching records."""
