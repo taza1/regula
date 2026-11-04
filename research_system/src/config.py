@@ -170,6 +170,13 @@ class ResearchConfig(BaseSettings):
     require_human_approval: bool = Field(default=True, description="Require human approval before release")
     require_separate_publisher: bool = Field(default=True, description="Require different user as publisher")
 
+    # Report governance (FUT-080). Both default off so existing release behavior is unchanged;
+    # enabling them is a release-policy decision for reviewers.
+    require_separate_adjudicator: bool = Field(
+        default=False, description="Approver may not be a user who adjudicated this run's blockers")
+    release_require_licence: bool = Field(
+        default=False, description="Every eligible source must declare a licence to approve or release")
+
     # Independent verification (FUT-060). "off" keeps the current review path unchanged.
     # When enabled it fails closed: an unavailable or non-independent verifier blocks release.
     independent_verification: Literal["off", "deterministic", "model", "both"] = Field(

@@ -38,8 +38,21 @@ class PublicationService:
                 or review['claims_digest'] != digest(review['claims'])
                 or review.get('policy') != release_policy()):
             raise ValueError('Reviewed artifacts changed; a new review and approval are required.')
+        config = get_research_config()
+        if config.release_require_licence and any(not (e.get('license') or '').strip() for e in evidence):
+            raise ValueError('Every eligible source must declare a licence before approval or release.')
         bundle = {'draft': draft, 'review': review, 'evidence': evidence,
-                  'policy_epoch': run['policy_epoch'], 'configuration_snapshot_id': run['configuration_snapshot_id']}
+                  'policy_epoch': run['policy_epoch'], 'configuration_snapshot_id': run['configuration_snapshot_id'],
+                  # Explicit manifest of what the approval covers (FUT-080): per-source licence and
+                  # hashes, review/verifier provenance, and the retrieval configuration in force.
+                  'manifest': {
+                      'sources': [{k: e.get(k) for k in ('evidence_id', 'source_id', 'doi', 'url', 'license',
+                                                         'content_hash', 'source_snapshot_id', 'passage_id')}
+                                  for e in evidence],
+                      'review': {k: review.get(k) for k in ('provider', 'model', 'prompt_version', 'policy')},
+                      'verification_mode': (review.get('verification') or {}).get('mode', 'off'),
+                      'retrieval': {'mode': config.retrieval_mode,
+                                    'embedding_provider': config.retrieval_embedding_provider}}}
         if adjudication:
             bundle['adjudication'] = adjudication
         return run, bundle
@@ -53,6 +66,9 @@ class PublicationService:
             run, bundle = self._bundle(db, key)
             if run['state'] != 'awaiting_approval':
                 raise ValueError('The run is not awaiting approval.')
+            if get_research_config().require_separate_adjudicator and user in {
+                    d.get('reviewer_id') for d in (bundle.get('adjudication') or {}).get('decisions', [])}:
+                raise ValueError('The approver may not be a user who adjudicated this run\'s blockers.')
             approval = dict(tenant_id=key[0], project_id=key[1], run_id=key[2],
                             report_revision=run['report_revision'], approval_id='APR-'+uuid.uuid4().hex,
                             approver_id=user, approval_rationale=rationale.strip(),
@@ -73,6 +89,8 @@ class PublicationService:
             if existing:
                 if existing['approval_reference'] != approval_id:
                     raise ValueError('This run was released with a different approval.')
+                if existing.get('is_withdrawn'):
+                    raise ValueError('This release was withdrawn; a corrected report needs a new review and approval.')
                 return read_entity(db, 'release', key, existing['release_id'])
             run, bundle = self._bundle(db, key)
             approval = read_entity(db, 'approval', key, approval_id)

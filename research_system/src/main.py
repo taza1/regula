@@ -30,6 +30,7 @@ from src.review_pipeline import ReviewPipeline, digest
 from src.publication import PublicationService
 from src.adjudication import AdjudicationService
 from src.embeddings import EmbeddingError, create_embedding_provider
+from src.governance import GovernanceService, release_readiness
 from src.audit import read_audit
 
 
@@ -883,23 +884,60 @@ async def withdraw_release(
             [ProjectMembership.PUBLISHER, ProjectMembership.ADMIN],
         )
         
-        success = await release_service.withdraw_release(
-            scoped_tenant_id, project_id, release_id,
-            reason=request.reason,
-            withdrawn_by=auth.user_id
-        )
-        
-        if not success:
-            raise HTTPException(status_code=409, detail="Failed to withdraw release")
-        
+        try:
+            GovernanceService(run_service.store).withdraw(
+                scoped_tenant_id, project_id, auth.user_id, release_id, request.reason)
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
         return {
-            "message": "Release withdrawn",
+            "message": "Release withdrawn; the artifact is retained as a tombstone and reads return 410",
             "release_id": release_id
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class RevokeEvidenceRequest(BaseModel):
+    reason: str
+
+
+@app.post("/api/v1/projects/{project_id}/evidence/{evidence_id}/revoke")
+async def revoke_evidence(project_id: str, evidence_id: str, request: RevokeEvidenceRequest,
+                          auth: AuthContext = Depends(get_auth_context)):
+    """Retract a source. Blocks new approvals/releases that use it and lists affected releases."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id,
+                                [ProjectMembership.REVIEWER, ProjectMembership.ADMIN])
+    try:
+        return GovernanceService(run_service.store).revoke_evidence(
+            auth.tenant_id, project_id, auth.user_id, evidence_id, request.reason)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/api/v1/projects/{project_id}/releases/{release_id}/provenance")
+async def release_provenance(project_id: str, release_id: str,
+                             auth: AuthContext = Depends(get_auth_context)):
+    """Claim -> cited passage -> review -> approval chain for a release (authenticated)."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id, list(ProjectMembership))
+    try:
+        return GovernanceService(run_service.store).provenance(auth.tenant_id, project_id, release_id)
+    except ValueError as error:
+        status = 404 if "not found" in str(error) else 409
+        raise HTTPException(status_code=status, detail=str(error)) from error
+
+
+@app.get("/api/v1/projects/{project_id}/release-readiness")
+async def release_readiness_report(project_id: str, auth: AuthContext = Depends(get_auth_context)):
+    """Promotion checklist. Reports; never enables release."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id, [ProjectMembership.ADMIN])
+    return release_readiness(get_research_config(), api_config)
 
 
 # ============================================================================
