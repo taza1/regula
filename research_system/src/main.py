@@ -29,6 +29,7 @@ from src.execution import ExecutionQueue, LocalResearchWorker
 from src.review_pipeline import ReviewPipeline, digest
 from src.publication import PublicationService
 from src.adjudication import AdjudicationService
+from src.embeddings import EmbeddingError, create_embedding_provider
 from src.audit import read_audit
 
 
@@ -73,6 +74,9 @@ async def lifespan(app: FastAPI):
     synthesis_service = SynthesisService(store)
     citation_validation_service = CitationValidationService(store)
     model_client = create_model_client(get_model_config())
+    if get_research_config().retrieval_embedding_provider == "model_endpoint":
+        evidence_service.embedder = create_embedding_provider(
+            "model_endpoint", get_model_config(), model_client)
     orchestrator = AgentOrchestrator(model_client)
     execution_queue = ExecutionQueue(store)
     worker = LocalResearchWorker(execution_queue, evidence_service, model_client)
@@ -176,7 +180,9 @@ class WithdrawReleaseRequest(BaseModel):
 class SearchEvidenceRequest(BaseModel):
     """Search evidence request."""
     query: str
-    search_type: str = "hybrid"
+    # None uses RETRIEVAL_MODE (default keyword). hybrid/semantic degrade to keyword
+    # when vectors are unavailable; the response says which mode ran and why.
+    search_type: Optional[Literal["keyword", "hybrid", "semantic"]] = None
     limit: int = 20
 
 
@@ -922,19 +928,43 @@ async def search_evidence(
                 ProjectMembership.ADMIN,
             ],
         )
-        results = await evidence_service.search_evidence(
+        outcome = await evidence_service.search_evidence_detailed(
             scoped_tenant_id, project_id, run_id,
             query=request.query,
             search_type=request.search_type,
             limit=request.limit,
         )
-        
+        results = outcome["results"]
+
         return {
             "results": [r.model_dump(mode='json') for r in results],
-            "count": len(results)
+            "count": len(results),
+            "mode": outcome["mode"],
+            "requested_mode": outcome["requested_mode"],
+            "degraded_reason": outcome["degraded_reason"],
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/index-vectors")
+async def index_evidence_vectors(
+    project_id: str,
+    run_id: str,
+    rebuild: bool = Query(False),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Embed this run's eligible evidence (idempotent; rebuild=true recomputes)."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id,
+                                [ProjectMembership.RESEARCHER, ProjectMembership.ADMIN])
+    if not await run_service.get_run(auth.tenant_id, project_id, run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        return await evidence_service.index_vectors(auth.tenant_id, project_id, run_id, rebuild)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except EmbeddingError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
 
 @app.post("/api/v1/projects/{project_id}/runs/{run_id}/evidence")

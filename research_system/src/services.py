@@ -20,6 +20,7 @@ from src.models import (
 from src.config import get_research_config, get_azure_config
 from src.local_store import LocalStateStore
 from src.injection_scan import scan_evidence
+from src.embeddings import EmbeddingProvider, cosine, create_embedding_provider
 from src.source_connectors import (
     FallbackSourceConnector,
     LocalSourceConnector,
@@ -627,9 +628,15 @@ class EvidenceService:
         self,
         store: Optional[LocalStateStore] = None,
         connector: Optional[SourceConnector] = None,
+        embedder: Any = "config",
     ):
         self.store = store or _default_store()
         self.connector = connector or create_source_connector()
+        if embedder == "config":
+            provider = get_research_config().retrieval_embedding_provider
+            # model_endpoint needs the live model client; the app injects it at startup.
+            embedder = None if provider == "model_endpoint" else create_embedding_provider(provider)
+        self.embedder: Optional[EmbeddingProvider] = embedder
 
     async def discover_sources(
         self,
@@ -1003,21 +1010,79 @@ class EvidenceService:
         project_id: str,
         run_id: str,
         query: str,
-        search_type: str = "hybrid",  # hybrid, keyword, semantic
+        search_type: Optional[str] = None,
         limit: int = 20,
     ) -> List[EvidenceRecord]:
-        """Search evidence with hybrid retrieval."""
+        """Search a run's eligible evidence. See ``search_evidence_detailed``."""
+        detailed = await self.search_evidence_detailed(
+            tenant_id, project_id, run_id, query, search_type, limit)
+        return detailed["results"]
+
+    async def search_evidence_detailed(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        query: str,
+        search_type: Optional[str] = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Search and report which mode actually ran.
+
+        ``keyword`` is FTS5/BM25 (the default). ``semantic`` and ``hybrid`` need an
+        embedding provider and indexed, current vectors; when those are missing,
+        stale, or the provider fails, the search falls back to keyword and says why
+        in ``degraded_reason`` instead of failing or silently changing behavior.
+        Eligibility, tenant, project and run filters apply to every mode.
+        """
+        config = get_research_config()
+        requested = search_type or config.retrieval_mode
+        if requested not in ("keyword", "hybrid", "semantic"):
+            raise ValueError(f"Unsupported search_type: {requested}")
+        bounded_limit = max(1, min(limit, 100))
+        outcome: Dict[str, Any] = {"results": [], "mode": "keyword", "requested_mode": requested,
+                                   "degraded_reason": None, "stale_vectors": 0}
         if not query.strip():
-            return []
+            return outcome
+
+        semantic: List[EvidenceRecord] = []
+        if requested != "keyword":
+            semantic, reason, outcome["stale_vectors"] = await self._semantic_ranking(
+                tenant_id, project_id, run_id, query, config)
+            if not semantic:
+                outcome["degraded_reason"] = reason
+        if requested == "keyword" or not semantic:
+            outcome["results"] = self._keyword_candidates(
+                tenant_id, project_id, run_id, query, bounded_limit)
+            return outcome
+
+        outcome["mode"] = requested
+        if requested == "semantic":
+            outcome["results"] = semantic[:bounded_limit]
+            return outcome
+        keyword = self._keyword_candidates(
+            tenant_id, project_id, run_id, query, config.retrieval_candidate_limit)
+        records = {e.evidence_id: e for e in semantic + keyword}
+        scores: Dict[str, float] = {}
+        for weight, ranking in ((config.retrieval_keyword_weight, keyword),
+                                (config.retrieval_semantic_weight, semantic)):
+            for rank, evidence in enumerate(ranking, start=1):
+                scores[evidence.evidence_id] = scores.get(evidence.evidence_id, 0.0) + \
+                    weight / (config.retrieval_fusion_k + rank)
+        order = sorted(scores, key=lambda evidence_id: (-scores[evidence_id], evidence_id))
+        outcome["results"] = [records[evidence_id] for evidence_id in order[:bounded_limit]]
+        return outcome
+
+    def _keyword_candidates(
+        self, tenant_id: str, project_id: str, run_id: str, query: str, limit: int
+    ) -> List[EvidenceRecord]:
         terms = [
             term
             for term in re.findall(r"[a-z0-9]{2,}", query.casefold())
             if term.strip()
         ]
-
-        bounded_limit = max(1, min(limit, 100))
         fts_candidates = self.store.search_evidence(
-            tenant_id, project_id, run_id, terms, bounded_limit
+            tenant_id, project_id, run_id, terms, limit
         )
         if fts_candidates is not None:
             return [
@@ -1041,7 +1106,78 @@ class EvidenceService:
             if score:
                 ranked.append((score, evidence))
         ranked.sort(key=lambda item: (-item[0], item[1].created_at))
-        return [evidence for _, evidence in ranked[:bounded_limit]]
+        return [evidence for _, evidence in ranked[:limit]]
+
+    async def _semantic_ranking(
+        self, tenant_id: str, project_id: str, run_id: str, query: str, config
+    ) -> tuple[List[EvidenceRecord], Optional[str], int]:
+        """Return (ranked evidence, reason when empty, stale vector count)."""
+        if self.embedder is None:
+            return [], "embeddings_disabled", 0
+        rows = self.store.run_vectors(tenant_id, project_id, run_id, self.embedder.model_id)
+        if not rows:
+            return [], "no_vectors_indexed", 0
+        try:
+            query_vector = (await asyncio.to_thread(self.embedder.embed, [query]))[0]
+        except Exception:  # noqa: BLE001 - provider errors degrade to keyword
+            return [], "embedding_provider_error", 0
+        scored: list[tuple[float, str, EvidenceRecord]] = []
+        stale = 0
+        for row in rows:
+            payload = row["evidence"]
+            # Live record decides eligibility; the index never does.
+            if (payload.get("run_id") != run_id
+                    or payload.get("source_use_decision") != "allowed"
+                    or payload.get("eligibility_status") != "eligible"):
+                continue
+            if row["vector_hash"] != payload.get("content_hash"):
+                stale += 1
+                continue
+            similarity = cosine(query_vector, row["vector"])
+            if similarity >= config.retrieval_min_similarity:
+                scored.append((similarity, payload["evidence_id"],
+                               EvidenceRecord.model_validate(payload)))
+        if not scored:
+            return [], ("stale_vectors" if stale else "no_semantic_matches"), stale
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [item[2] for item in scored[:config.retrieval_candidate_limit]], None, stale
+
+    async def index_vectors(
+        self, tenant_id: str, project_id: str, run_id: str, rebuild: bool = False
+    ) -> Dict[str, Any]:
+        """Embed eligible evidence that has no current vector. Idempotent and resumable.
+
+        Progress is saved per batch, so a provider failure mid-way (EmbeddingError)
+        leaves valid vectors in place and a rerun finishes the rest. ``rebuild``
+        deletes this run's vectors for the active model first.
+        """
+        if self.embedder is None:
+            raise ValueError("Embeddings are disabled (RETRIEVAL_EMBEDDING_PROVIDER=none).")
+        model_id = self.embedder.model_id
+        if rebuild:
+            self.store.delete_vectors(tenant_id, project_id, run_id, model_id)
+        current = {row["evidence_id"]: row["vector_hash"]
+                   for row in self.store.run_vectors(tenant_id, project_id, run_id, model_id)}
+        pending, already = [], 0
+        for payload in self.store.scoped_list("evidence", tenant_id, project_id, run_id, limit=1000):
+            if (payload.get("source_use_decision") != "allowed"
+                    or payload.get("eligibility_status") != "eligible"):
+                continue
+            if current.get(payload["evidence_id"]) == payload.get("content_hash"):
+                already += 1
+            else:
+                pending.append(payload)
+        indexed = 0
+        step = max(1, getattr(self.embedder, "batch_size", 16))
+        for start in range(0, len(pending), step):
+            batch = pending[start:start + step]
+            vectors = await asyncio.to_thread(
+                self.embedder.embed, [f"{e.get('title', '')}\n{e.get('passage', '')}" for e in batch])
+            for payload, vector in zip(batch, vectors):
+                self.store.put_vector(tenant_id, project_id, run_id, payload["evidence_id"],
+                                      model_id, payload.get("content_hash", ""), vector)
+                indexed += 1
+        return {"indexed": indexed, "already_current": already, "model_id": model_id}
     
     async def get_evidence(
         self,

@@ -165,6 +165,19 @@ class ResearchConfig(BaseSettings):
     # Approval settings
     require_human_approval: bool = Field(default=True, description="Require human approval before release")
     require_separate_publisher: bool = Field(default=True, description="Require different user as publisher")
+
+    # Retrieval (FUT-020). Defaults preserve keyword-only FTS5/BM25 behavior.
+    retrieval_mode: Literal["keyword", "hybrid", "semantic"] = Field(
+        default="keyword", description="Default search mode when a request does not choose one")
+    retrieval_embedding_provider: Literal["none", "local_hash", "model_endpoint"] = Field(
+        default="none",
+        description="none disables vectors; local_hash is an offline lexical test adapter; "
+                    "model_endpoint sends evidence text to the configured model endpoint")
+    retrieval_candidate_limit: int = Field(default=200, ge=1, le=1000)
+    retrieval_keyword_weight: float = Field(default=0.6, ge=0)
+    retrieval_semantic_weight: float = Field(default=0.4, ge=0)
+    retrieval_fusion_k: int = Field(default=60, ge=1, description="Reciprocal-rank-fusion constant")
+    retrieval_min_similarity: float = Field(default=0.05, ge=-1, le=1)
     
 class APIConfig(BaseSettings):
     """API server configuration."""
