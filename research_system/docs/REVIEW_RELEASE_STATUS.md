@@ -37,6 +37,14 @@ Install `requirements.txt`. Existing mock mode keeps the deterministic draft flo
 
 Set `ENABLE_REPORT_RELEASE=true` only for the approved environment. Complete a run, review its evidence and model findings, then POST `/api/v1/projects/{project}/runs/{run}/request-approval` with `approval_rationale`. A different publisher POSTs `/release` with the resulting `approval_id`. Artifact URLs returned by release require the same authentication as the API. The default remains release-disabled.
 
+### Adjudication, injection pre-gate and audit chain
+
+A review with blockers leaves the run in `adjudication_required`. Each blocker has a category: `model` and `fact_check` blockers may be cleared as `accepted_limitation` or `false_positive`; `security` blockers (suspected prompt injection) only as `false_positive`; `integrity` and `policy` blockers cannot be waived and need a fix and a new review. A reviewer or admin records one decision per blocker with a written rationale via POST `/runs/{run}/adjudicate` (read state with GET `/runs/{run}/adjudication`). When every blocker has a valid decision the run returns to `awaiting_approval`. The decisions are stored separately from the immutable review, tied to its digest, and included in the approved bundle digest, so they cannot be reused for another review or changed after approval.
+
+A rule-based scan (`src/injection_scan.py`) flags instruction-like source text as a `security` blocker regardless of what the model reports; the offline citation validator records it as a critical finding. It is a backstop for known phrasings, not a substitute for the model review.
+
+Audit events are hash-chained per run (`src/audit.py`): GET `/runs/{run}/audit` returns them with `chain_valid`. Project-level events (membership changes) form their own chain; events written before chaining are counted as `legacy_events` and not verified. This is local tamper-evidence, not an immutable external audit sink.
+
 An admin can set another user's project roles with PUT `/api/v1/projects/{project}/members/{user}` and `{"roles":["publisher"]}`. The API prevents removal of the last admin. In Entra mode use object IDs, `ENTRA_TENANT_ID`, `ENTRA_AUDIENCE`, and a delegated `ENTRA_SCOPE` (default `Research.Access`). Local identity headers do not provide production authentication.
 
 ## Foundry packaging and deployment

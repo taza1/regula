@@ -2,6 +2,8 @@
 import uuid
 from datetime import datetime, timezone
 
+from src.adjudication import valid_adjudication
+from src.audit import append_audit
 from src.config import get_research_config
 from src.review_pipeline import digest, evidence_snapshot, read_entity, write_entity, release_policy
 
@@ -21,16 +23,26 @@ class PublicationService:
         run = read_entity(db, 'run', key, key[2])
         draft = read_entity(db, 'draft', key, key[2])
         review = read_entity(db, 'model_review', key, key[2])
-        if not run or not draft or not review or not review.get('passed') or review.get('blockers'):
+        if not run or not draft or not review:
             raise ValueError('All model review gates must pass before approval or release.')
+        adjudication = None
+        if not review.get('passed') or review.get('blockers'):
+            # Blockers may be cleared only by a complete, valid human adjudication
+            # of this exact review; it then becomes part of the approved bundle.
+            adjudication = valid_adjudication(db, key, review)
+            if not adjudication:
+                raise ValueError('All model review gates must pass before approval or release.')
         evidence = evidence_snapshot(db, key, run['report_revision'])
         if (review['report_revision'] != run['report_revision'] or review['provider'] == 'mock'
                 or review['draft_digest'] != digest(draft) or review['evidence_digest'] != digest(evidence)
                 or review['claims_digest'] != digest(review['claims'])
                 or review.get('policy') != release_policy()):
             raise ValueError('Reviewed artifacts changed; a new review and approval are required.')
-        return run, {'draft': draft, 'review': review, 'evidence': evidence,
-                     'policy_epoch': run['policy_epoch'], 'configuration_snapshot_id': run['configuration_snapshot_id']}
+        bundle = {'draft': draft, 'review': review, 'evidence': evidence,
+                  'policy_epoch': run['policy_epoch'], 'configuration_snapshot_id': run['configuration_snapshot_id']}
+        if adjudication:
+            bundle['adjudication'] = adjudication
+        return run, bundle
 
     def approve(self, key, user, rationale):
         if not rationale or not rationale.strip():
@@ -92,6 +104,4 @@ class PublicationService:
 
     @staticmethod
     def _audit(db, key, user, action, reference):
-        write_entity(db, 'audit', key, uuid.uuid4().hex,
-                     {'user_id': user, 'action': action, 'reference': reference,
-                      'at': datetime.now(timezone.utc).isoformat()}, insert=True)
+        append_audit(db, key, user, action, reference)

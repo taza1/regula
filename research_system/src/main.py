@@ -1,6 +1,6 @@
 """FastAPI application for the research system."""
 
-from typing import Optional, List
+from typing import Literal, Optional, List
 import asyncio
 from contextlib import suppress
 from pathlib import Path
@@ -28,6 +28,8 @@ from src.model_client import ModelConnectionError, ResearchModelClient, create_m
 from src.execution import ExecutionQueue, LocalResearchWorker
 from src.review_pipeline import ReviewPipeline, digest
 from src.publication import PublicationService
+from src.adjudication import AdjudicationService
+from src.audit import read_audit
 
 
 # ============================================================================
@@ -1105,6 +1107,47 @@ async def review_report(project_id: str, run_id: str, auth: AuthContext = Depend
         raise HTTPException(status_code=502, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+class AdjudicateRequest(BaseModel):
+    blocker_id: str
+    decision: Literal["accepted_limitation", "false_positive"]
+    rationale: str
+
+
+@app.get("/api/v1/projects/{project_id}/runs/{run_id}/adjudication")
+async def get_adjudication(project_id: str, run_id: str, auth: AuthContext = Depends(get_auth_context)):
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id, list(ProjectMembership))
+    try:
+        return AdjudicationService(run_service.store).status((auth.tenant_id, project_id, run_id))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/adjudicate")
+async def adjudicate_blocker(project_id: str, run_id: str, request: AdjudicateRequest,
+                             auth: AuthContext = Depends(get_auth_context)):
+    """Record a reviewer decision on one review blocker; completing all unblocks approval."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id,
+                                [ProjectMembership.REVIEWER, ProjectMembership.ADMIN])
+    key = (auth.tenant_id, project_id, run_id)
+    service = AdjudicationService(run_service.store)
+    try:
+        service.decide(key, auth.user_id, request.blocker_id, request.decision, request.rationale)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return service.status(key)
+
+
+@app.get("/api/v1/projects/{project_id}/runs/{run_id}/audit")
+async def get_run_audit(project_id: str, run_id: str, auth: AuthContext = Depends(get_auth_context)):
+    """Hash-chained audit events for a run, with chain verification."""
+    await _require_project_role(auth.tenant_id, project_id, auth.user_id,
+                                [ProjectMembership.ADMIN, ProjectMembership.REVIEWER,
+                                 ProjectMembership.PUBLISHER])
+    return read_audit(run_service.store, auth.tenant_id, project_id, run_id)
 
 
 @app.get("/api/v1/projects/{project_id}/releases/{release_id}/{artifact_kind}")
