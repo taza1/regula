@@ -27,6 +27,7 @@ DECISIONS = {"accepted_limitation", "false_positive"}
 ALLOWED_DECISIONS = {
     "model": DECISIONS,
     "fact_check": DECISIONS,
+    "verification": DECISIONS,  # independent verifier disagreement: a human weighs it
     "security": {"false_positive"},
     "integrity": set(),
     "policy": set(),

@@ -9,9 +9,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.audit import append_audit
-from src.config import get_research_config
+from src.config import get_model_config, get_research_config
 from src.injection_scan import scan_evidence
 from src.model_client import ModelConnectionError
+from src.verification import verify_independently
 
 
 def digest(value):
@@ -76,8 +77,9 @@ def evidence_snapshot(db, key, revision):
 
 
 class ReviewPipeline:
-    def __init__(self, store, model):
-        self.store, self.model = store, model
+    def __init__(self, store, model, verifiers=None):
+        # `verifiers` overrides the configured independent verifiers (tests, evaluation).
+        self.store, self.model, self.verifiers = store, model, verifiers
 
     async def execute(self, tenant, project, run_id):
         key = (tenant, project, run_id)
@@ -152,6 +154,16 @@ class ReviewPipeline:
             add_blocker(f"Evidence {evidence_id} contains instruction-like text ({', '.join(labels)}); "
                         "treated as a prompt-injection risk.", 'security')
         config = get_research_config()
+        verification = None
+        if config.independent_verification != 'off':
+            # Advisory second opinion (FUT-060): it can only add blockers, never clear one.
+            outcome = await verify_independently(
+                config.independent_verification, self.model, claims, selected,
+                {v.claim_id: v.verdict for v in check.verdicts}, config, get_model_config(),
+                self.verifiers)
+            verification = outcome['bundle']
+            for text, category in outcome['blockers']:
+                add_blocker(text, category)
         for claim in claims:
             cited = [e for e in selected if e['evidence_id'] in claim['evidence_ids']]
             origins = {g for e in cited for g in e.get('independence_group_ids', [])}
@@ -184,6 +196,8 @@ class ReviewPipeline:
                       blockers=blockers, blocker_items=blocker_items, passed=not blockers,
                       evidence_digest=digest(evidence),
                       draft_digest=digest(draft), claims_digest=digest(claims), claims=claims)
+        if verification is not None:
+            review['verification'] = verification
         with self.store._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             current = read_entity(db, 'run', key, run_id)
