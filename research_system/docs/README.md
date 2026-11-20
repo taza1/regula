@@ -14,6 +14,7 @@ The project documentation is grouped as follows:
 - [`AZURE_TASK_BREAKDOWN.md`](AZURE_TASK_BREAKDOWN.md) - execution waves, task mapping, and acceptance matrix
 - [`FUTURE_TASKS_AND_ARCHITECTURE_GATES.md`](FUTURE_TASKS_AND_ARCHITECTURE_GATES.md) - detailed future tasks, validation, dependencies, and architecture review gates
 - [`HARDENING_BACKLOG.md`](HARDENING_BACKLOG.md) - six audit follow-up subtasks, priorities, and acceptance criteria
+- [`tasks/README.md`](tasks/README.md) - separate execution specifications for the six remaining quality and Foundry integration tasks
 
 The source code is in [`../src/`](../src/) and automated tests are in
 [`../tests/`](../tests/).
